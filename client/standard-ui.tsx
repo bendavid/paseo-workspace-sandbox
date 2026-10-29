@@ -64,9 +64,7 @@ export function extraMuted(theme: PluginTheme): TextStyle {
 }
 
 export type Glyph =
-  | { kind: "icon"; name: string }
-  | { kind: "initial"; text: string }
-  | { kind: "none" };
+  { kind: "icon"; name: string } | { kind: "initial"; text: string } | { kind: "none" };
 
 /** A 16px glyph: a muted Lucide icon, or a project's initial in a filled square. */
 export function GlyphView({

@@ -1,5 +1,8 @@
 {
   "id": "workspace-sandbox",
+  "name": "Workspace Sandbox",
+  "description": "Run a workspace's agents and terminals in a container, microVM, or Bubblewrap sandbox that sees only the folders you choose.",
+  "media": [],
   "requirements": {
     "paseo": ">=0.13.0"
   }
