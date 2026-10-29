@@ -1,0 +1,43 @@
+Workspace Sandbox runs a workspace's agents and terminals inside a sandbox that sees only the folders you choose: the workspace itself, your agents' own state, and any extra folders you add. A sandbox is a Podman or Docker container, a microsandbox microVM, or a Bubblewrap sandbox built from your own system.
+
+## How it works
+
+Press **New sandboxed workspace** in the sidebar header or the Command Center, pick a project, a new worktree or the project directory, a container profile and a starting branch, and press Create. The workspace opens at once and its sandbox starts in the background.
+
+Agents you start from the workspace's composer run in the sandbox with your usual attachments, modes and commands. The plugin switches each one to a sandboxed copy of the provider you picked, such as `claude-sandbox`, which runs the agent's CLI inside the sandbox. Sessions, permissions and history work as usual. The **Sandboxed** button in the workspace header opens the Sandbox panel, and the terminal button beside it opens a shell or one of your terminal profiles inside the sandbox. Archiving the workspace removes its sandbox.
+
+## Setup
+
+You need one of these on the daemon's machine:
+
+- **Podman** or **Docker**: one long-lived container per workspace, files written as your user.
+- **microsandbox** (`msb`): one microVM per workspace.
+- **Bubblewrap** (`bwrap`): a fresh sandbox per launch with your system's `/usr` and `/etc` read-only, so it uses the tools installed on the host. It needs unprivileged user namespaces.
+
+Container profiles, in the form and in Settings > Sandbox, hold the engine, image, network (host, separate or none), extra folders to mount (read-write or read-only) and extra engine arguments. The first profile uses Podman, or Docker when only Docker is installed, with the `node:22-bookworm-slim` image. That image has no agent CLIs: use an image that installs them, or mount them from the host. Creating a sandbox pulls its profile's image from the registry you name the first time.
+
+The plugin needs Paseo 0.13.0 or later. It has been tested on Linux.
+
+## Claude Code sign-in
+
+Each sandbox gets its own Claude Code config folder, so its agents can't read or change another workspace's transcripts. It starts with your `CLAUDE.md`, agents, commands, skills, output styles and plugins, read-only, and your `settings.json`.
+
+Sandboxes never receive your refresh token, which would sign you out on the host when a sandbox used it. The plugin copies only your current access token into its data folder, readable only by you, and Claude Code in the sandbox reads it through `apiKeyHelper`. Shortly before the token expires, the plugin runs `claude auth status` on the host, which refreshes it through Claude Code's own login. A `/logout` on the host stops sandboxed Claude agents, and the header button asks you to sign in again. If a profile already mounts your Claude folder read-write, the sandbox uses it directly. On macOS Claude Code keeps its login in the Keychain, which the plugin does not read; set `CLAUDE_CODE_OAUTH_TOKEN` instead.
+
+## What it changes
+
+- The first time each provider runs in a sandbox, the plugin adds a `<provider>-sandbox` provider profile to the daemon's `config.json`. Profiles stay after the plugin is removed, and sandboxed agents fail rather than resume on the host until you delete them.
+- Its state, the private Claude folders, the token copy and the `sandbox-run` launcher live in `plugin-data/workspace-sandbox` in your Paseo home.
+- While deciding whether a sandbox can use your Claude folder, it briefly creates and deletes a file there.
+
+Agents send prompts and tool results to their providers as usual; the sandbox limits what they can reach on your machine, not what they send.
+
+## Limits
+
+The plugin covers what Paseo's plugin API reaches. These still run on the host:
+
+- Paseo's own terminals and terminal profiles, `paseo.json` scripts and services, and worktree setup commands. For an untrusted repository, setup alone defeats the sandbox.
+- Git commands the daemon runs in the workspace, and title, branch and commit message generation.
+- OpenCode and providers registered by plugins, which the plugin refuses to start in a sandboxed workspace.
+
+Model lists and version checks for sandboxed providers come from the host's CLI, so images should carry the same agent versions as the host. A sandbox in the project directory applies to new agents started anywhere in that directory, from any of the project's workspaces, until you archive it.

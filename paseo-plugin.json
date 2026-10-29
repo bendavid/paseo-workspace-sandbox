@@ -2,6 +2,12 @@
   "id": "workspace-sandbox",
   "name": "Workspace Sandbox",
   "description": "Run a workspace's agents and terminals in a container, microVM, or Bubblewrap sandbox that sees only the folders you choose.",
+  "translations": {
+    "zh-CN": {
+      "name": "工作区沙箱",
+      "description": "在容器、microVM 或 Bubblewrap 沙箱中运行工作区的 Agent 和终端，沙箱只能访问你选择的文件夹。"
+    }
+  },
   "media": [],
   "requirements": {
     "paseo": ">=0.13.0"
