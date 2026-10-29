@@ -6,7 +6,7 @@ import path from "node:path";
 import type { Engine } from "../../shared/rpc";
 import { isPodman, which, type ContainerPolicy, type ContainerTarget } from "../container";
 import { bubblewrapBackend } from "./bubblewrap";
-import { boxliteBackend, microsandboxBackend } from "./microvm";
+import { microsandboxBackend } from "./microsandbox";
 import { ociBackend } from "./oci";
 import type { SandboxBackend } from "./types";
 
@@ -17,7 +17,6 @@ const BACKENDS: Record<Engine, SandboxBackend> = {
   docker: ociBackend,
   bubblewrap: bubblewrapBackend,
   microsandbox: microsandboxBackend,
-  boxlite: boxliteBackend,
 };
 
 export const DEFAULT_COMMANDS: Record<Engine, string> = {
@@ -25,14 +24,12 @@ export const DEFAULT_COMMANDS: Record<Engine, string> = {
   docker: "docker",
   bubblewrap: "bwrap",
   microsandbox: "msb",
-  boxlite: "boxlite",
 };
 
 // Where the installers put these; a daemon started from a desktop session may not have them on
 // its PATH.
 const INSTALL_LOCATIONS: Partial<Record<Engine, string[]>> = {
   microsandbox: [".microsandbox/bin/msb"],
-  boxlite: [".local/bin/boxlite"],
 };
 
 export function backendFor(engine: Engine): SandboxBackend {

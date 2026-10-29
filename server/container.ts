@@ -185,9 +185,9 @@ async function workspaceMounts(cwd: string): Promise<Mount[]> {
 
 /**
  * Engines refuse two mounts at one destination, and get mounts sorted parents first, so extra
- * mounts may contain the plugin's: `~:ro` keeps the workspace read-write (except in BoxLite, which
- * keeps a read-write folder inside a read-only one read-only). At the same path the plugin's mount wins, keeping the workspace writable and git hooks
- * and config read-only; between extra mounts, read-only wins.
+ * mounts may contain the plugin's: `~:ro` keeps the workspace read-write. At the same path the
+ * plugin's mount wins, keeping the workspace writable and git hooks and config read-only; between
+ * extra mounts, read-only wins.
  */
 function addExtraMounts(mounts: Mount[], extra: readonly Mount[]): Mount[] {
   const owned = new Set(mounts.map((mount) => mount.path));
@@ -244,7 +244,7 @@ export async function resolveMounts(
   for (const mount of extra) {
     if (!existsSync(mount.path)) throw new Error(`Extra mount ${mount.path} does not exist`);
   }
-  // Parents first: Bubblewrap and BoxLite apply mounts in the order given, so a parent listed
+  // Parents first: Bubblewrap applies mounts in the order given, so a parent listed
   // later would hide its child.
   return addExtraMounts(mounts, extra).toSorted(
     (left, right) => left.path.split("/").length - right.path.split("/").length,

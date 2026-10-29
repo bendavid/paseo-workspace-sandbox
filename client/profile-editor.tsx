@@ -22,7 +22,6 @@ const ENGINE_OPTIONS = [
   { label: "Docker", value: "docker" },
   { label: "Bubblewrap (host system, no image)", value: "bubblewrap" },
   { label: "microsandbox (microVM)", value: "microsandbox" },
-  { label: "BoxLite (microVM)", value: "boxlite" },
 ] as const;
 
 const DEFAULT_COMMANDS: Record<Engine, string> = {
@@ -30,7 +29,6 @@ const DEFAULT_COMMANDS: Record<Engine, string> = {
   docker: "docker",
   bubblewrap: "bwrap",
   microsandbox: "msb",
-  boxlite: "boxlite",
 };
 
 /** What each engine's run command is called, for the extra arguments hint. */
@@ -39,7 +37,6 @@ const RUN_COMMANDS: Record<Engine, string> = {
   docker: "docker run",
   bubblewrap: "bwrap",
   microsandbox: "msb create",
-  boxlite: "boxlite run",
 };
 
 const NETWORK_HINTS: Record<Engine, string> = {
@@ -48,8 +45,6 @@ const NETWORK_HINTS: Record<Engine, string> = {
   bubblewrap: "Host and Separate both share the host's network",
   microsandbox:
     "Host allows everything, including the host's loopback; Separate allows the internet",
-  boxlite:
-    "Host and Separate use BoxLite's own network; the host's loopback is host.boxlite.internal",
 };
 
 const NETWORKS = [

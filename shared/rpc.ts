@@ -2,11 +2,11 @@ import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
 /**
- * What runs a workspace's sandbox. Podman, Docker, microsandbox, and BoxLite keep one long-lived
- * sandbox per workspace from an image; Bubblewrap starts a fresh one for each launch from the host's
+ * What runs a workspace's sandbox. Podman, Docker, and microsandbox keep one long-lived sandbox per
+ * workspace from an image; Bubblewrap starts a fresh one for each launch from the host's
  * own system, read-only.
  */
-export const ENGINES = ["podman", "docker", "bubblewrap", "microsandbox", "boxlite"] as const;
+export const ENGINES = ["podman", "docker", "bubblewrap", "microsandbox"] as const;
 export const EngineSchema = z.enum(ENGINES);
 export type Engine = z.infer<typeof EngineSchema>;
 
@@ -15,7 +15,6 @@ const ENGINE_LABELS: Record<Engine, string> = {
   docker: "Docker",
   bubblewrap: "Bubblewrap",
   microsandbox: "microsandbox",
-  boxlite: "BoxLite",
 };
 
 /** "Podman · node:22", or "Bubblewrap · host system"; profiles from before engines show the image. */
@@ -36,7 +35,7 @@ export const ContainerProfileSchema = z.object({
   name: z.string().trim().min(1, "Enter a name"),
   /** Profiles saved before engines take the engine of the old global container CLI setting. */
   engine: EngineSchema.optional(),
-  /** The engine's command, when not the default on PATH (`podman`, `docker`, `bwrap`, `msb`, `boxlite`). */
+  /** The engine's command, when not the default on PATH (`podman`, `docker`, `bwrap`, `msb`). */
   cli: z.string().trim().optional(),
   // Must contain the agent CLIs (claude, codex), or receive them through extraMounts. Bubblewrap
   // uses the host's system instead and ignores it.
