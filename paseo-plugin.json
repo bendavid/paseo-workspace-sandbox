@@ -1,0 +1,6 @@
+{
+  "id": "workspace-sandbox",
+  "requirements": {
+    "paseo": ">=0.13.0"
+  }
+}
