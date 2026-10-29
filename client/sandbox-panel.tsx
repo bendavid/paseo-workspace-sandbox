@@ -33,7 +33,7 @@ function describe(container: ContainerStatus): string {
   }
 }
 
-function describeClaudeFolder(claudeHome: string | undefined, dir: string | null): string {
+function describeClaudeFolder(claudeHome: string, dir: string | null): string {
   if (claudeHome === "checking" || !dir) return "Being decided as the sandbox starts";
   return claudeHome === "private" ? dir : `Shared with the host: ${dir}`;
 }
@@ -122,17 +122,15 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
             <Text style={styles.value}>{sandbox.container}</Text>
           </SettingsRow>
           <SettingsRow label="Profile">
-            <Text style={styles.value}>{sandbox.profile?.name ?? "Default"}</Text>
+            <Text style={styles.value}>{sandbox.profile.name}</Text>
           </SettingsRow>
           <SettingsRow label="Engine">
-            <Text style={styles.value}>
-              {describeProfile(sandbox.profile ?? { image: sandbox.image })}
-            </Text>
+            <Text style={styles.value}>{describeProfile(sandbox.profile)}</Text>
           </SettingsRow>
           <SettingsRow label="Network">
-            <Text style={styles.value}>{sandbox.profile?.network ?? "host"}</Text>
+            <Text style={styles.value}>{sandbox.profile.network}</Text>
           </SettingsRow>
-          {sandbox.profile?.extraMounts ? (
+          {sandbox.profile.extraMounts ? (
             <SettingsRow label="Extra mounts">
               <Text style={styles.value}>{sandbox.profile.extraMounts}</Text>
             </SettingsRow>

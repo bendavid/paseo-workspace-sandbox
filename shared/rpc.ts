@@ -17,9 +17,8 @@ const ENGINE_LABELS: Record<Engine, string> = {
   microsandbox: "microsandbox",
 };
 
-/** "Podman · node:22", or "Bubblewrap · host system"; profiles from before engines show the image. */
-export function describeProfile(profile: { engine?: Engine; image: string }): string {
-  if (!profile.engine) return profile.image;
+/** "Podman · node:22", or "Bubblewrap · host system". */
+export function describeProfile(profile: { engine: Engine; image: string }): string {
   const what = engineUsesImage(profile.engine) ? profile.image : "host system";
   return `${ENGINE_LABELS[profile.engine]} · ${what}`;
 }
@@ -29,12 +28,14 @@ export function engineUsesImage(engine: Engine): boolean {
   return engine !== "bubblewrap";
 }
 
+/** The image new profiles start with: Node.js for the npm-installed agent CLIs, on Debian. */
+export const DEFAULT_IMAGE = "docker.io/library/node:22-bookworm-slim";
+
 /** A saved sandbox configuration. Each workspace keeps a copy of the one it was created with. */
 export const ContainerProfileSchema = z.object({
   id: z.string().min(1),
   name: z.string().trim().min(1, "Enter a name"),
-  /** Profiles saved before engines take the engine of the old global container CLI setting. */
-  engine: EngineSchema.optional(),
+  engine: EngineSchema,
   /** The engine's command, when not the default on PATH (`podman`, `docker`, `bwrap`, `msb`). */
   cli: z.string().trim().optional(),
   // Must contain the agent CLIs (claude, codex), or receive them through extraMounts. Bubblewrap
@@ -56,10 +57,9 @@ export const SandboxRecordSchema = z.object({
   projectId: z.string(),
   cwd: z.string(),
   container: z.string(),
-  image: z.string(),
   createdAt: z.string(),
   /** The workspace's container configuration, copied from a profile when it was created. */
-  profile: ContainerProfileSchema.optional(),
+  profile: ContainerProfileSchema,
   /**
    * Registered under the workspace ID the plugin chose, before the workspace exists, so clients
    * that see the new workspace already find its sandbox. `cwd` is empty until creation returns.
@@ -68,10 +68,9 @@ export const SandboxRecordSchema = z.object({
   /**
    * `private`: the container gets its own Claude config folder and signs in with the host's
    * current access token. `shared`: the container's own configuration already makes the host's
-   * folder writable, so it uses that. `checking`: being decided as the sandbox starts. Sandboxes
-   * from before this field share the host's folder.
+   * folder writable, so it uses that. `checking`: being decided as the sandbox starts.
    */
-  claudeHome: z.enum(["private", "shared", "checking"]).optional(),
+  claudeHome: z.enum(["private", "shared", "checking"]),
   /** Why `claudeHome` was chosen, for the Sandbox panel. */
   claudeHomeReason: z.string().optional(),
 });
@@ -114,11 +113,6 @@ export const createSandboxedWorkspaceRpc = defineRpc({
     /** Starting ref for a Git project's worktree; the project's current branch when omitted. */
     baseRef: z.string().trim().min(1).optional(),
     title: z.string().trim().min(1).optional(),
-    /**
-     * Names the workspace and branch, as New workspace's prompt does: the launch terminal's command
-     * or prompt. Agents start from the workspace's own composer once the sandbox is ready.
-     */
-    prompt: z.string().trim().min(1).optional(),
   }),
   /** Returns as soon as the workspace exists; the sandbox is ready when its status says so. */
   output: z.object({ workspaceId: z.string() }),
@@ -127,9 +121,7 @@ export const createSandboxedWorkspaceRpc = defineRpc({
 export const SandboxTerminalProfileSchema = z.object({
   id: z.string(),
   name: z.string(),
-  /** Whether the composer text goes into the profile's command as a prompt. */
-  takesPrompt: z.boolean(),
-  /** The command it runs with no prompt, shown in the launch menu. */
+  /** The command it runs, shown in the launch menu. */
   command: z.string(),
 });
 
@@ -179,7 +171,7 @@ export const deleteContainerProfileRpc = defineRpc({
 
 /** What the header badge shows: known without inspecting the container. */
 export const SandboxHealthSchema = z.discriminatedUnion("state", [
-  /** The container, or the form's first agent, is still starting. */
+  /** The sandbox is still starting. */
   z.object({ state: z.literal("starting") }),
   z.object({ state: z.literal("ready") }),
   z.object({ state: z.literal("failed"), error: z.string() }),
@@ -210,14 +202,10 @@ export const sandboxStatusRpc = defineRpc({
 
 export const openSandboxShellRpc = defineRpc({
   name: "sandbox.shell.open",
-  /**
-   * Without a profile, a login shell, with `prompt` typed at it as a command; with one, the
-   * profile's command with `prompt` substituted.
-   */
+  /** Without a profile, a login shell; with one, the profile's command. */
   input: z.object({
     workspaceId: z.string(),
     profileId: z.string().optional(),
-    prompt: z.string().optional(),
   }),
   output: z.object({ terminalId: z.string() }),
 });

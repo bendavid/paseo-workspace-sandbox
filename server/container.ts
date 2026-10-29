@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
@@ -73,20 +72,11 @@ export function workspaceTarget(record: SandboxRecord, claude: ClaudeHome): Cont
   return {
     container: record.container,
     label: `workspace=${record.workspaceId}`,
-    image: record.image,
+    image: record.profile.image,
     workspace: record.cwd,
     workdir: record.cwd,
     claude,
   };
-}
-
-/**
- * Earlier versions answered model discovery from this container, one per data directory. It is
- * removed when the plugin starts.
- */
-export function legacyProbeContainerName(dataDirectory: string): string {
-  const digest = createHash("sha256").update(dataDirectory).digest("hex").slice(0, 10);
-  return `paseo-sandbox-probe-${digest}`;
 }
 
 export async function which(command: string): Promise<string | null> {

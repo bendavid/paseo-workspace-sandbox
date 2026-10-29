@@ -10,6 +10,7 @@ import {
 } from "@getpaseo/plugin/client/ui";
 import { useCallback, useState } from "react";
 import {
+  DEFAULT_IMAGE,
   deleteContainerProfileRpc,
   engineUsesImage,
   saveContainerProfileRpc,
@@ -57,7 +58,7 @@ const BLANK: Omit<ContainerProfile, "id"> = {
   name: "",
   engine: "podman",
   cli: "",
-  image: "docker.io/library/node:22-bookworm-slim",
+  image: DEFAULT_IMAGE,
   network: "host",
   extraMounts: "",
   extraRunArgs: "",
@@ -80,7 +81,7 @@ type Draft = Omit<ContainerProfile, "id">;
 function fields(profile: ContainerProfile): Draft {
   return {
     name: profile.name,
-    engine: profile.engine ?? "podman",
+    engine: profile.engine,
     cli: profile.cli ?? "",
     image: profile.image,
     network: profile.network,
@@ -165,7 +166,7 @@ function EditorForm({
   }, [deleting, target]);
   const error = saving.error?.message ?? deleting.error?.message ?? null;
   const editing = target.mode === "edit";
-  const engine = draft.engine ?? "podman";
+  const { engine } = draft;
   const needsImage = engineUsesImage(engine);
   return (
     <>

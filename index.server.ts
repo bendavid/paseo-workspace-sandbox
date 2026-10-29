@@ -6,7 +6,7 @@ import { registerHooks } from "./server/hooks";
 import { ProfileManager } from "./server/profiles";
 import { SandboxService } from "./server/service";
 import { SandboxStore, resolveDataDirectory } from "./server/store";
-import { listTerminalProfiles, removeLegacyTerminalProfile } from "./server/terminals";
+import { listTerminalProfiles } from "./server/terminals";
 import { writeWrapper } from "./server/wrapper";
 import {
   createSandboxedWorkspaceRpc,
@@ -19,10 +19,8 @@ import {
   sandboxStatusRpc,
   saveContainerProfileRpc,
 } from "./shared/rpc";
-import { sandboxSettings } from "./shared/settings";
 
 export default function contribute(server: PluginServerContext) {
-  const settings = server.registerSettings(sandboxSettings);
   const store = new SandboxStore(resolveDataDirectory());
   // The plugin's own directory is not available at runtime, so the wrapper lives in the data
   // directory, where its path survives reloads, updates, and removal.
@@ -35,26 +33,18 @@ export default function contribute(server: PluginServerContext) {
       store.list().some((record) => record.claudeHome === "private"),
     );
     await login.start().catch((error) => console.error("Claude login keeper failed", error));
-    const service = new SandboxService(store, settings, containerProfiles, login, wrapper);
-    await containerProfiles.load(() => service.profileSeed());
-    const legacy = await service.profileEngineFromSettings();
-    await containerProfiles.fillEngines(legacy.engine, legacy.cli);
-    // Model discovery and version checks for sandboxed providers run the host's CLI, assumed to
-    // match the sandboxes'. Earlier versions ran them in a probe container.
-    service
-      .removeLegacyProbe()
-      .catch((error: unknown) => console.error("Removing the probe container failed", error));
+    await containerProfiles.load();
+    const service = new SandboxService(store, containerProfiles, login, wrapper);
     return { service, profiles, containerProfiles, login };
   })();
 
-  // The server entry receives no Paseo session; handlers and hooks do. The first one to run
-  // removes the terminal profile earlier versions added and reconciles sandboxes. The client entry calls an RPC on load,
-  // so this happens when an app connects. Provider profiles are derived per agent, in the hook.
+  // The server entry receives no Paseo session; handlers and hooks do. The first one to run reads
+  // the host's Claude login settings and reconciles sandboxes. The client entry calls an RPC on
+  // load, so this happens when an app connects. Provider profiles are derived per agent, in the hook.
   let initialized: Promise<SandboxService> | null = null;
   const resolve = (paseo: PaseoApi): Promise<SandboxService> => {
     initialized ??= loaded
       .then(async ({ service, login }) => {
-        await removeLegacyTerminalProfile(paseo);
         await login.configure(hostClaudeFromConfig((await paseo.config.get()).config));
         service.reconcile(paseo).catch((error) => console.error("Sandbox reconcile failed", error));
         return service;

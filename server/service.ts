@@ -1,8 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { rm } from "node:fs/promises";
-import path from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
-import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { ClaudeLoginKeeper } from "./claude-login";
 import { prepareClaudeHome } from "./claude-home";
@@ -14,9 +11,6 @@ import {
 } from "./backends/index";
 import {
   containerName,
-  isPodman,
-  legacyProbeContainerName,
-  runCli,
   shellQuote,
   workspaceTarget,
   type ClaudeHome,
@@ -25,13 +19,12 @@ import {
 } from "./container";
 import type { ContainerProfiles } from "./container-profiles";
 import { listRefs } from "./git";
-import { resolveTerminalLaunch, type TerminalLaunch } from "./terminals";
-import { environmentFile, writeFileAtomic, type SandboxStore } from "./store";
+import { resolveTerminalLaunch } from "./terminals";
+import { writeFileAtomic, type SandboxStore } from "./store";
 import {
   engineUsesImage,
   type ContainerProfile,
   type ContainerStatus,
-  type Engine,
   type SandboxHealth,
   type SandboxRecord,
   type createSandboxedWorkspaceRpc,
@@ -40,9 +33,7 @@ import {
   type openSandboxShellRpc,
   type sandboxStatusRpc,
 } from "../shared/rpc";
-import type { sandboxSettings } from "../shared/settings";
 
-type Settings = PluginSettings<typeof sandboxSettings.schema>;
 type CreateInput = RpcInput<typeof createSandboxedWorkspaceRpc>;
 
 // Why a sandbox whose configuration could show the host's Claude folder still gets a private one.
@@ -71,13 +62,12 @@ async function listActiveWorkspaceIds(paseo: PaseoApi): Promise<Set<string>> {
 /**
  * A worktree sandbox gets a directory of its own. A directory sandbox is a new workspace on the
  * project directory, shared with the project's other workspaces, so it gets a title that tells
- * the two apart. The prompt names the workspace and branch the way New workspace does.
+ * the two apart.
  */
 function buildWorkspaceRequest(
   input: CreateInput,
   plan: {
     isolation: "worktree" | "directory";
-    namingPrompt: string;
     project: {
       projectRootPath: string;
       projectCustomName?: string | null;
@@ -103,11 +93,7 @@ function buildWorkspaceRequest(
       ? `${plan.project.projectCustomName ?? plan.project.projectDisplayName} (sandboxed)`
       : undefined;
   const title = input.title ?? defaultTitle;
-  return {
-    source,
-    ...(title ? { title } : {}),
-    ...(plan.namingPrompt ? { firstAgentContext: { prompt: plan.namingPrompt } } : {}),
-  };
+  return { source, ...(title ? { title } : {}) };
 }
 
 function describeError(error: unknown): string {
@@ -123,16 +109,14 @@ export class SandboxService {
 
   constructor(
     private readonly store: SandboxStore,
-    private readonly settings: Settings,
     private readonly containerProfiles: ContainerProfiles,
     private readonly login: ClaudeLoginKeeper,
     readonly wrapper: string,
   ) {}
 
-  /** Sandboxes from before private config folders keep the host's, which they already mount. */
   private claudeHome(record: SandboxRecord): ClaudeHome {
     if (record.claudeHome === "checking") return { mode: "none" };
-    if (record.claudeHome !== "private") {
+    if (record.claudeHome === "shared") {
       return { mode: "shared", configDir: this.login.hostConfigDir };
     }
     return {
@@ -144,10 +128,7 @@ export class SandboxService {
   }
 
   /** A workspace's container target, with its private Claude folder prepared. */
-  private async prepareTarget(
-    record: SandboxRecord,
-    image = record.image,
-  ): Promise<ContainerTarget> {
+  private async prepareTarget(record: SandboxRecord): Promise<ContainerTarget> {
     const claude = this.claudeHome(record);
     if (claude.mode === "private") {
       await prepareClaudeHome({
@@ -156,72 +137,20 @@ export class SandboxService {
         helperCommand: this.login.helperCommand,
       });
     }
-    return { ...workspaceTarget(record, claude), image };
-  }
-
-  /** Seeds the "Default" container profile from the settings that predate profiles. */
-  async profileSeed() {
-    const values = await this.settingsValues();
-    const { engine, cli } = await this.profileEngineFromSettings();
-    return {
-      engine,
-      ...(cli ? { cli } : {}),
-      image: values.image,
-      network: values.network,
-      extraMounts: values.extraMounts,
-      extraRunArgs: values.extraRunArgs,
-    };
-  }
-
-  private async settingsValues() {
-    const state = await this.settings.read();
-    if (state.status !== "ready") throw new Error(`Sandbox settings are invalid: ${state.error}`);
-    return state.values;
-  }
-
-  /**
-   * The engine the old global container CLI setting stands for, for profiles saved before engines.
-   * The command is kept only when it isn't plain `docker` or `podman`. Without either installed,
-   * Podman.
-   */
-  async profileEngineFromSettings(): Promise<{ engine: Engine; cli?: string }> {
-    const configured = (await this.settingsValues()).containerCli.trim();
-    const engine = await this.legacyEngine().then(
-      (legacy) => legacy.engine,
-      () => "podman" as const,
-    );
-    return ["docker", "podman"].includes(configured) ? { engine } : { engine, cli: configured };
-  }
-
-  /**
-   * Profiles saved before engines use the old global container CLI setting: Podman when that is
-   * what it runs, Docker otherwise.
-   */
-  private async legacyEngine(): Promise<{ engine: Engine; cli: string }> {
-    const cli = await resolveEngineCli("docker", (await this.settingsValues()).containerCli);
-    return { engine: (await isPodman(cli)) ? "podman" : "docker", cli };
+    return workspaceTarget(record, claude);
   }
 
   /** A profile's engine and its command, plus the network, mounts, and run arguments. */
   private async policy(profile: ContainerProfile): Promise<ContainerPolicy> {
-    const { engine, cli } = profile.engine
-      ? { engine: profile.engine, cli: await resolveEngineCli(profile.engine, profile.cli) }
-      : await this.legacyEngine();
     return {
-      engine,
-      cli,
+      engine: profile.engine,
+      cli: await resolveEngineCli(profile.engine, profile.cli),
       network: profile.network,
       extraMounts: profile.extraMounts,
       extraRunArgs: profile.extraRunArgs,
     };
   }
 
-  /** A workspace's own configuration; sandboxes from before profiles fall back to "Default". */
-  private recordProfile(record: SandboxRecord): ContainerProfile {
-    return record.profile ?? { ...this.containerProfiles.get(undefined), image: record.image };
-  }
-
-  /** Writes the wrapper's spec for one container and returns its run arguments. */
   /** What `sandbox-run` sources to join a workspace's sandbox; see its contract in wrapper.ts. */
   private async writeSpec(
     record: SandboxRecord,
@@ -241,11 +170,10 @@ export class SandboxService {
 
   /** Decides the Claude folder if that is still open, then starts or recreates the container. */
   private async runContainer(record: SandboxRecord): Promise<void> {
-    const profile = this.recordProfile(record);
-    const policy = await this.policy(profile);
+    const policy = await this.policy(record.profile);
     const decided =
       record.claudeHome === "checking" ? await this.decideClaudeHome(record, policy) : record;
-    const target = await this.prepareTarget(decided, profile.image);
+    const target = await this.prepareTarget(decided);
     await this.writeSpec(decided, target, policy);
     await backendFor(policy.engine).start(target, policy);
   }
@@ -333,25 +261,6 @@ export class SandboxService {
     }
   }
 
-  /**
-   * Earlier versions kept a probe container for model discovery. Runs without a session now use
-   * the host's CLI, so the probe and its files go.
-   */
-  async removeLegacyProbe(): Promise<void> {
-    const specFile = path.join(this.store.directory, "probe.sh");
-    const { cli } = await this.legacyEngine();
-    await runCli(cli, ["rm", "-f", legacyProbeContainerName(this.store.directory)]).catch(
-      () => undefined,
-    );
-    for (const file of [
-      specFile,
-      specFile.replace(/\.sh$/, ".failed"),
-      environmentFile(specFile),
-    ]) {
-      await rm(file, { force: true });
-    }
-  }
-
   async refs(input: RpcInput<typeof listRefsRpc>, paseo: PaseoApi) {
     const project = await this.project(input.projectId, paseo);
     if (project.projectKind !== "git") return { current: null, refs: [] };
@@ -380,13 +289,7 @@ export class SandboxService {
         `The container profile "${profile.name}" needs an image for ${policy.engine}`,
       );
     }
-    return {
-      profile,
-      project,
-      isolation,
-      policy,
-      namingPrompt: input.prompt ?? "",
-    };
+    return { profile, project, isolation, policy };
   }
 
   /**
@@ -404,7 +307,6 @@ export class SandboxService {
       projectId: input.projectId,
       cwd: "",
       container: containerName(workspaceId),
-      image: plan.profile.image,
       createdAt: new Date().toISOString(),
       profile: plan.profile,
       pending: true,
@@ -426,26 +328,6 @@ export class SandboxService {
     const record: SandboxRecord = { ...settled, cwd };
     await this.store.put(record);
     return record;
-  }
-
-  /**
-   * The wrapper waits for the container, so the terminal opens at once and its shell appears when
-   * the container is up. A blank terminal's command is typed at the prompt, which the terminal
-   * buffers until then.
-   */
-  private async openLaunchTerminal(
-    record: SandboxRecord,
-    terminal: TerminalLaunch,
-    paseo: PaseoApi,
-  ): Promise<string | null> {
-    const handle = await paseo.terminals.create({
-      workspaceId: record.workspaceId,
-      name: terminal.name,
-      command: this.wrapper,
-      args: ["terminal", "--title", terminal.name, ...terminal.argv],
-    });
-    if (terminal.input) handle.write(`${terminal.input}\r`);
-    return handle.current()?.id ?? null;
   }
 
   async createWorkspace(
@@ -503,8 +385,7 @@ export class SandboxService {
 
   /** A failed start stays reported until a later attempt runs the container. */
   private async inspectAfterFailure(sandbox: SandboxRecord): Promise<ContainerStatus> {
-    const profile = this.recordProfile(sandbox);
-    const policy = await this.policy(profile);
+    const policy = await this.policy(sandbox.profile);
     const inspected = await backendFor(policy.engine).status(
       workspaceTarget(sandbox, { mode: "none" }),
       policy,
@@ -516,7 +397,10 @@ export class SandboxService {
     return inspected;
   }
 
-  /** Opens a login shell, or a terminal profile's command with its prompt, in the container. */
+  /**
+   * Opens a login shell, or a terminal profile's command, in the sandbox. The terminal runs
+   * `sandbox-run`, which joins the sandbox the plugin started.
+   */
   async openShell(
     input: RpcInput<typeof openSandboxShellRpc>,
     paseo: PaseoApi,
@@ -525,11 +409,14 @@ export class SandboxService {
     if (!record) throw new Error("This workspace is not sandboxed");
     // Within the client's 60-second RPC timeout; a failure reaches the user as the call's error.
     await this.readyWithin(record.workspaceId, 45_000);
-    const launch = await resolveTerminalLaunch(paseo, {
-      ...(input.profileId ? { profileId: input.profileId } : {}),
-      prompt: input.prompt ?? "",
+    const launch = await resolveTerminalLaunch(paseo, input.profileId);
+    const handle = await paseo.terminals.create({
+      workspaceId: record.workspaceId,
+      name: launch.name,
+      command: this.wrapper,
+      args: ["terminal", "--title", launch.name, ...launch.argv],
     });
-    const terminalId = await this.openLaunchTerminal(record, launch, paseo);
+    const terminalId = handle.current()?.id;
     if (!terminalId) throw new Error("The terminal was not created");
     return { terminalId };
   }
@@ -539,7 +426,7 @@ export class SandboxService {
     if (!record) return;
     await this.starting.get(workspaceId);
     this.failures.delete(workspaceId);
-    const policy = await this.policy(this.recordProfile(record));
+    const policy = await this.policy(record.profile);
     await backendFor(policy.engine).remove(workspaceTarget(record, { mode: "none" }), policy);
   }
 
@@ -583,8 +470,7 @@ export class SandboxService {
 
   /** Rewrites a sandbox's spec and private Claude folder for the current plugin and settings. */
   private async refreshSpec(record: SandboxRecord): Promise<void> {
-    const profile = this.recordProfile(record);
-    const policy = await this.policy(profile);
-    await this.writeSpec(record, await this.prepareTarget(record, profile.image), policy);
+    const policy = await this.policy(record.profile);
+    await this.writeSpec(record, await this.prepareTarget(record), policy);
   }
 }

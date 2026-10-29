@@ -4,10 +4,11 @@ import path from "node:path";
 import { z } from "zod";
 import {
   ContainerProfileSchema,
+  DEFAULT_IMAGE,
   engineUsesImage,
   type ContainerProfile,
-  type Engine,
 } from "../shared/rpc";
+import { which } from "./container";
 import { writeFileAtomic } from "./store";
 
 const FileSchema = z.object({
@@ -16,7 +17,19 @@ const FileSchema = z.object({
   profiles: z.array(ContainerProfileSchema).min(1),
 });
 
-type ProfileValues = Omit<ContainerProfile, "id" | "name">;
+/** The first profile: Podman, or Docker when only Docker is installed. */
+async function defaultProfile(): Promise<ContainerProfile> {
+  const engine = (await which("podman")) || !(await which("docker")) ? "podman" : "docker";
+  return {
+    id: "default",
+    name: "Default",
+    engine,
+    image: DEFAULT_IMAGE,
+    network: "host",
+    extraMounts: "",
+    extraRunArgs: "",
+  };
+}
 
 /**
  * Saved container configurations, in `container-profiles.json` next to the plugin's state. A new
@@ -31,8 +44,8 @@ export class ContainerProfiles {
     this.file = path.join(directory, "container-profiles.json");
   }
 
-  /** Loads the saved profiles, or creates "Default" from `seed` on first start. */
-  async load(seed: () => Promise<ProfileValues>): Promise<void> {
+  /** Loads the saved profiles, or creates "Default" on first start. */
+  async load(): Promise<void> {
     let raw: string | null = null;
     try {
       raw = await readFile(this.file, "utf8");
@@ -45,20 +58,8 @@ export class ContainerProfiles {
       this.defaultProfileId = state.defaultId;
       return;
     }
-    this.profiles = [{ id: "default", name: "Default", ...(await seed()) }];
+    this.profiles = [await defaultProfile()];
     this.defaultProfileId = "default";
-    await this.persist();
-  }
-
-  /**
-   * Gives profiles saved before engines the engine of the old global container CLI setting, so the
-   * editor shows it; `cli` is kept only when it differs from the engine's default command.
-   */
-  async fillEngines(engine: Engine, cli: string | undefined): Promise<void> {
-    if (this.profiles.every((profile) => profile.engine)) return;
-    this.profiles = this.profiles.map((profile) =>
-      profile.engine ? profile : { ...profile, engine, ...(cli ? { cli } : {}) },
-    );
     await this.persist();
   }
 
@@ -78,7 +79,7 @@ export class ContainerProfiles {
     input: Omit<ContainerProfile, "id"> & { id?: string },
     makeDefault: boolean,
   ): Promise<ContainerProfile> {
-    if (input.engine && engineUsesImage(input.engine) && !input.image) {
+    if (engineUsesImage(input.engine) && !input.image) {
       throw new Error(`${input.engine} needs an image`);
     }
     const profile: ContainerProfile = {
