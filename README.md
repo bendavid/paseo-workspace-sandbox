@@ -111,8 +111,8 @@ a profile never changes an existing workspace's container; the Sandbox panel sho
 | Podman       | One container per workspace      | Yes   | `--network host` / `bridge` / `none`                                                   | Yes                   |
 | Docker       | One container per workspace      | Yes   | as Podman                                                                              | Through podman-docker |
 | Bubblewrap   | One namespace sandbox per launch | No    | host network / host network / `--unshare-net`                                          | Yes                   |
-| microsandbox | One microVM per workspace        | Yes   | `--net all` / `--net public` / `--no-net`                                              | No                    |
-| BoxLite      | One microVM per workspace        | Yes   | its own network (host loopback: `host.boxlite.internal`) / same / `--network disabled` | No                    |
+| microsandbox | One microVM per workspace        | Yes   | `--net all` / `--net public` / `--no-net`                                              | Yes (0.7.11)          |
+| BoxLite      | One microVM per workspace        | Yes   | its own network (host loopback: `host.boxlite.internal`) / same / `--network disabled` | Fails; see below      |
 
 The profile's **Command** is the engine's executable; empty means the default (`podman`, `docker`,
 `bwrap`, `msb`, `boxlite`) on PATH, or where the microVM installers put it. Container runtimes such
@@ -127,11 +127,17 @@ as krun, gVisor, or Kata go in **Extra run arguments** (`--runtime krun`).
   a mount covers it. It needs unprivileged user namespaces; "starting" runs `true` in one, so a host
   without them fails as a start failure. Extra run arguments are added to `bwrap`.
 - **microsandbox and BoxLite** keep a libkrun microVM per workspace and join it with `exec`, sharing
-  host folders over virtio-fs at the same paths and running commands as your uid. Environment
-  variables reach them as `-e NAME=VALUE`, so their values appear on the engine's command line; the
-  container engines read a private file instead. libkrun does not confine a guest to a shared
-  folder's subtree, so share narrow folders. Neither is tested yet: the flags follow their documented
-  CLIs, and `inspect` output is matched loosely.
+  host folders over virtio-fs at the same paths and running commands as your uid, so files keep your
+  ownership. Each launch's variables are exported to the client and passed as `-e NAME`, which keeps
+  their values off its command line. libkrun does not confine a guest to a shared folder's subtree,
+  so share narrow folders.
+- **BoxLite 0.10.8 does not work here yet,** for three reasons found in testing on x86_64:
+  - libkrun runs out of interrupt lines with more than two shared folders (`IrqsExhausted` in the
+    box's `shim.stderr`), and a sandbox needs at least the workspace, its Claude folder, and the token
+    folder. microsandbox has no such limit.
+  - On btrfs, BoxLite copies its `boxlite-shim` into each box without the execute bit, so no box
+    starts. A `BOXLITE_HOME` on another filesystem avoids it.
+  - A read-write folder inside a read-only one stays read-only, whatever the order.
 
 The [Claude folder check](#claude-folders) uses a marker file the host creates, not device and
 inode numbers, which a microVM's virtio-fs does not preserve.

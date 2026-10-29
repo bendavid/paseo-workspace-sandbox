@@ -30,6 +30,8 @@ interface Dialect {
   inspectShell: string[];
   /** The `exec` flags for a TTY, or for none. */
   ttyShell: string;
+  /** Assignments prefixed to the client's `exec`, such as quieter logging. */
+  clientEnv: string;
 }
 
 async function options(
@@ -99,17 +101,18 @@ function microvmBackend(dialect: Dialect): SandboxBackend {
         "  _env=$1 _tty=$2 _dir=$3",
         "  shift 4",
         '  set -- -w "$_dir" "$sandbox_container" -- "$@"',
+        "  # `-e NAME` takes the value from the client's environment, which keeps values off its",
+        "  # command line. Callers run this in a subshell, so the exports stay there; a later line",
+        "  # for the same name wins.",
         '  if [ -n "$_env" ]; then',
-        "    # Prepended in reverse, so later lines still win.",
         "    while IFS= read -r _line; do",
         "      case $_line in '' | '#'*) continue ;; esac",
-        '      set -- -e "$_line" "$@"',
-        "    done <<SANDBOX_ENV",
-        '$(reverse_lines "$_env")',
-        "SANDBOX_ENV",
+        '      export "$_line"',
+        '      set -- -e "${_line%%=*}" "$@"',
+        '    done <"$_env"',
         "  fi",
         `  ${dialect.ttyShell}`,
-        '  "$sandbox_cli" exec $_tty_flags "$@"',
+        `  ${dialect.clientEnv}"$sandbox_cli" exec $_tty_flags "$@"`,
         "}",
         "sandbox_signal() {",
         '  "$sandbox_cli" exec "$sandbox_container" -- sh -c \'kill -s "$1" "$(cat "$0")" 2>/dev/null\' "$2" "$1"',
@@ -137,26 +140,32 @@ export const microsandboxBackend = microvmBackend({
     if (policy.network === "none") return ["--no-net"];
     return ["--net", policy.network === "host" ? "all" : "public"];
   },
+  // `inspect --format json` has a top-level "status" ("Running", "Stopped") and no ID; the creation
+  // time changes whenever the sandbox is recreated.
   async status(cli, name) {
+    let raw: string;
     try {
-      const raw = await runCli(cli, ["inspect", name, "--format", "json"]);
-      const match = /"(?:status|state)"\s*:\s*"([^"]+)"/i.exec(raw);
-      return stateFrom(match?.[1] ?? "");
+      raw = await runCli(cli, ["inspect", name, "--format", "json"]);
     } catch {
       return { state: "missing" };
     }
+    const parsed: unknown = JSON.parse(raw);
+    const status =
+      parsed !== null && typeof parsed === "object" ? (parsed as { status?: unknown }).status : "";
+    return stateFrom(typeof status === "string" ? status : "");
   },
   inspectShell: [
     "sandbox_ready() {",
     '  "$sandbox_cli" inspect "$sandbox_container" --format json 2>/dev/null |',
-    '    grep -q -i -E \'"(status|state)" *: *"running"\'',
+    '    grep -q -i -E \'^  "status": *"running"\'',
     "}",
     "sandbox_id() {",
     '  "$sandbox_cli" inspect "$sandbox_container" --format json 2>/dev/null |',
-    '    grep -o -E \'"id" *: *"[^"]+"\' | head -n 1',
+    "    grep -E '^  \"created_at\":' | head -n 1",
     "}",
   ],
   ttyShell: 'if [ -n "$_tty" ]; then _tty_flags=-t; else _tty_flags=--no-tty; fi',
+  clientEnv: "",
 });
 
 /** BoxLite: https://docs.boxlite.ai/reference/cli.md */
@@ -194,4 +203,6 @@ export const boxliteBackend = microvmBackend({
     "}",
   ],
   ttyShell: 'if [ -n "$_tty" ]; then _tty_flags="-i -t"; else _tty_flags=-i; fi',
+  // Its client logs a warning to stderr whenever a command exits while input is still attached.
+  clientEnv: "RUST_LOG=error ",
 });

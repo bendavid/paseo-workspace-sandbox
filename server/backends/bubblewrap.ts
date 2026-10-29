@@ -53,17 +53,14 @@ async function systemArguments(): Promise<string[]> {
 }
 
 /**
- * Everything but the environment and the command. Bubblewrap applies mounts in the order given, so
- * parents come first, as container engines order them themselves. The home directory is a scratch
- * folder for the launch unless a mount covers it.
+ * Everything but the environment and the command; mounts arrive sorted parents first. The home
+ * directory is a scratch folder for the launch unless a mount covers it.
  */
 async function sandboxArguments(
   target: ContainerTarget,
   policy: ContainerPolicy,
 ): Promise<string[]> {
-  const mounts = (await resolveMounts(target, policy)).toSorted(
-    (left, right) => left.path.split("/").length - right.path.split("/").length,
-  );
+  const mounts = await resolveMounts(target, policy);
   return [
     "--die-with-parent",
     "--unshare-all",
