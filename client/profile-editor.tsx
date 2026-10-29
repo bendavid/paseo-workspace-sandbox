@@ -11,18 +11,57 @@ import {
 import { useCallback, useState } from "react";
 import {
   deleteContainerProfileRpc,
+  engineUsesImage,
   saveContainerProfileRpc,
   type ContainerProfile,
+  type Engine,
 } from "../shared/rpc";
 
+const ENGINE_OPTIONS = [
+  { label: "Podman", value: "podman" },
+  { label: "Docker", value: "docker" },
+  { label: "Bubblewrap (host system, no image)", value: "bubblewrap" },
+  { label: "microsandbox (microVM)", value: "microsandbox" },
+  { label: "BoxLite (microVM)", value: "boxlite" },
+] as const;
+
+const DEFAULT_COMMANDS: Record<Engine, string> = {
+  podman: "podman",
+  docker: "docker",
+  bubblewrap: "bwrap",
+  microsandbox: "msb",
+  boxlite: "boxlite",
+};
+
+/** What each engine's run command is called, for the extra arguments hint. */
+const RUN_COMMANDS: Record<Engine, string> = {
+  podman: "podman run",
+  docker: "docker run",
+  bubblewrap: "bwrap",
+  microsandbox: "msb create",
+  boxlite: "boxlite run",
+};
+
+const NETWORK_HINTS: Record<Engine, string> = {
+  podman: "Host lets agents reach the daemon on loopback",
+  docker: "Host lets agents reach the daemon on loopback",
+  bubblewrap: "Host and Separate both share the host's network",
+  microsandbox:
+    "Host allows everything, including the host's loopback; Separate allows the internet",
+  boxlite:
+    "Host and Separate use BoxLite's own network; the host's loopback is host.boxlite.internal",
+};
+
 const NETWORKS = [
-  { label: "Host (Paseo tools reach the daemon)", value: "host" },
-  { label: "Bridge", value: "bridge" },
+  { label: "Host", value: "host" },
+  { label: "Separate", value: "bridge" },
   { label: "None", value: "none" },
 ] as const;
 
 const BLANK: Omit<ContainerProfile, "id"> = {
   name: "",
+  engine: "podman",
+  cli: "",
   image: "docker.io/library/node:22-bookworm-slim",
   network: "host",
   extraMounts: "",
@@ -46,6 +85,8 @@ type Draft = Omit<ContainerProfile, "id">;
 function fields(profile: ContainerProfile): Draft {
   return {
     name: profile.name,
+    engine: profile.engine ?? "podman",
+    cli: profile.cli ?? "",
     image: profile.image,
     network: profile.network,
     extraMounts: profile.extraMounts,
@@ -114,6 +155,10 @@ function EditorForm({
         setDraft((current) => ({ ...current, [key]: value })),
     [],
   );
+  const selectEngine = useCallback((value: string) => {
+    const choice = ENGINE_OPTIONS.find((option) => option.value === value);
+    if (choice) setDraft((current) => ({ ...current, engine: choice.value }));
+  }, []);
   const submit = useCallback(() => {
     saving.mutate({
       profile: { ...draft, ...(target.mode === "edit" ? { id: target.profile.id } : {}) },
@@ -125,6 +170,8 @@ function EditorForm({
   }, [deleting, target]);
   const error = saving.error?.message ?? deleting.error?.message ?? null;
   const editing = target.mode === "edit";
+  const engine = draft.engine ?? "podman";
+  const needsImage = engineUsesImage(engine);
   return (
     <>
       <SettingsCard>
@@ -134,15 +181,32 @@ function EditorForm({
           onChangeText={field("name")}
           disabled={busy}
         />
-        <SettingsInput
-          label="Image"
-          hint="Must provide the agent CLIs, or mount them below"
-          initialValue={draft.image}
-          onChangeText={field("image")}
+        <SettingsSelect
+          label="Engine"
+          value={engine}
+          options={ENGINE_OPTIONS}
+          onValueChange={selectEngine}
           disabled={busy}
         />
+        <SettingsInput
+          label="Command"
+          hint={`Leave empty for ${DEFAULT_COMMANDS[engine]} on PATH`}
+          initialValue={draft.cli ?? ""}
+          onChangeText={field("cli")}
+          disabled={busy}
+        />
+        {needsImage ? (
+          <SettingsInput
+            label="Image"
+            hint="Must provide the agent CLIs, or mount them below"
+            initialValue={draft.image}
+            onChangeText={field("image")}
+            disabled={busy}
+          />
+        ) : null}
         <SettingsSelect
           label="Network"
+          hint={NETWORK_HINTS[engine]}
           value={draft.network}
           options={NETWORKS}
           onValueChange={field("network")}
@@ -157,7 +221,7 @@ function EditorForm({
         />
         <SettingsInput
           label="Extra run arguments"
-          hint="Added to the container's run command, such as --memory 4g"
+          hint={`Added to ${RUN_COMMANDS[engine]}`}
           initialValue={draft.extraRunArgs}
           onChangeText={field("extraRunArgs")}
           disabled={busy}
@@ -175,7 +239,7 @@ function EditorForm({
           label={editing ? "Existing workspaces keep their copy" : "Saved for new workspaces"}
           actionLabel={saving.isPending ? "Saving…" : "Save"}
           onPress={submit}
-          disabled={busy || !draft.name.trim() || !draft.image.trim()}
+          disabled={busy || !draft.name.trim() || (needsImage && !draft.image.trim())}
           error={error}
         />
         {editing && target.canDelete ? (

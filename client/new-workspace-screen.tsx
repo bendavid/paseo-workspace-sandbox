@@ -19,6 +19,7 @@ import {
 } from "react-native";
 import {
   createSandboxedWorkspaceRpc,
+  describeProfile,
   listContainerProfilesRpc,
   listRefsRpc,
   type ContainerProfile,
@@ -365,7 +366,7 @@ function usePickerOptions(form: SandboxForm) {
     const profiles: DropdownOption[] = form.lists.profiles.profiles.map((candidate) => ({
       id: candidate.id,
       label: candidate.name,
-      description: candidate.image,
+      description: describeProfile(candidate),
       glyph: GLYPH_CONTAINER,
       selected: candidate.id === form.profile?.id,
     }));

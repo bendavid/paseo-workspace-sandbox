@@ -11,6 +11,7 @@ import {
 import { useCallback, useMemo } from "react";
 import { Text } from "react-native";
 import {
+  describeProfile,
   openSandboxShellRpc,
   sandboxStatusRpc,
   type ClaudeLogin,
@@ -123,8 +124,10 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
           <SettingsRow label="Profile">
             <Text style={styles.value}>{sandbox.profile?.name ?? "Default"}</Text>
           </SettingsRow>
-          <SettingsRow label="Image">
-            <Text style={styles.value}>{sandbox.profile?.image ?? sandbox.image}</Text>
+          <SettingsRow label="Engine">
+            <Text style={styles.value}>
+              {describeProfile(sandbox.profile ?? { image: sandbox.image })}
+            </Text>
           </SettingsRow>
           <SettingsRow label="Network">
             <Text style={styles.value}>{sandbox.profile?.network ?? "host"}</Text>

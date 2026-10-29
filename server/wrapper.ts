@@ -72,48 +72,62 @@ if [ -z "$workspace_id" ] || [ ! -f "$spec" ]; then
   exec "$@"
 fi
 
+# The engine's part, written by the plugin for each workspace (see server/backends):
+#   sandbox_workdir         the workspace directory inside the sandbox
+#   sandbox_tracks_pid      1 when launches join a long-lived sandbox, so signals must be forwarded
+#   sandbox_ready           succeeds when a command can run now
+#   sandbox_id              prints an ID that changes when the sandbox is recreated
+#   sandbox_exec ENV_FILE TTY WORKDIR -- COMMAND...
+#                           runs COMMAND in the sandbox with ENV_FILE's NAME=VALUE lines (none when
+#                           empty) and a TTY when TTY is 1; Bubblewrap's replaces the shell
+#   sandbox_signal SIGNAL PID_FILE, sandbox_cleanup PID_FILE    when sandbox_tracks_pid is 1
+reverse_lines() { sed '1!G;h;$!d' "$1"; }
+
 . "$spec"
 
-# The plugin starts and recreates containers, and waits for this one before letting an agent or
-# terminal launch, so it should be running.
-running=$("$sandbox_cli" container inspect --format '{{.State.Running}}' "$sandbox_container" 2>/dev/null)
-[ "$running" = true ] || fail "the sandbox is not running; start the agent or terminal again from Paseo, which starts it"
+# The plugin starts and recreates sandboxes, and waits for this one before letting an agent or
+# terminal launch, so it should be ready.
+sandbox_ready || fail "the sandbox is not running; start the agent or terminal again from Paseo, which starts it"
 
 case $PWD in
   "$sandbox_workdir" | "$sandbox_workdir"/*) workdir=$PWD ;;
   *) workdir=$sandbox_workdir ;;
 esac
 
-env_args=
+forwarded=
 for name in $(env | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_]*\\)=.*/\\1/p'); do
   case $name in
-    ${FORWARDED_ENV.join(" | ")}) env_args="$env_args -e $name" ;;
+    ${FORWARDED_ENV.join(" | ")}) forwarded="$forwarded $name" ;;
   esac
 done
 
-tty_flag=
-[ -t 0 ] && [ -t 1 ] && tty_flag=-t
+tty=
+[ -t 0 ] && [ -t 1 ] && tty=1
 
 # The sandboxed terminal's shell. Commands started without it (agents, terminal profiles) get the
-# environment it builds, captured once per container: running it per launch would be slow, and
+# environment it builds, captured once per sandbox: running it per launch would be slow, and
 # whatever the dotfiles print would reach the agent's protocol stream.
 login_shell='if command -v bash >/dev/null 2>&1; then exec bash -il "$@"; fi; exec sh -il "$@"'
 # See environmentFile in store.ts.
 env_file=\${spec%.sh}.env
 
 capture_env() {
-  container_id=$("$sandbox_cli" container inspect --format '{{.Id}}' "$sandbox_container" 2>/dev/null)
-  [ -n "$container_id" ] || return 0
-  [ "$(head -n 1 "$env_file" 2>/dev/null)" = "#container=$container_id" ] && return 0
+  id=$(sandbox_id)
+  [ -n "$id" ] || return 0
+  [ "$(head -n 1 "$env_file" 2>/dev/null)" = "#sandbox=$id" ] && return 0
   [ "$mode" = terminal ] && printf 'workspace-sandbox: reading the login shell environment...\\n' >&2
   marker=__paseo_sandbox_env_$$__
   # NUL-separated where env supports it, so a value spanning lines is dropped, not misread.
   capture="printf '%s\\n' $marker; if env -0 >/dev/null 2>&1; then env -0 | tr '\\n\\000' '\\001\\n'; else env; fi; printf '%s\\n' $marker"
-  limit=
-  command -v timeout >/dev/null 2>&1 && limit="timeout 60"
-  # shellcheck disable=SC2086
-  output=$($limit "$sandbox_cli" exec -w "$workdir" "$sandbox_container" \\
-    sh -c "$login_shell" sh -c "$capture" </dev/null 2>/dev/null)
+  out=$(mktemp "\${TMPDIR:-/tmp}/paseo-sandbox-capture.XXXXXX") || return 0
+  ( sandbox_exec "" "" "$workdir" -- sh -c "$login_shell" sh -c "$capture" </dev/null >"$out" 2>/dev/null ) &
+  capturing=$!
+  ( sleep 60; kill "$capturing" 2>/dev/null ) &
+  watchdog=$!
+  wait "$capturing" 2>/dev/null
+  kill "$watchdog" 2>/dev/null
+  output=$(cat "$out")
+  rm -f "$out"
   if [ "$(printf '%s\\n' "$output" | grep -c "^$marker\\$")" -ne 2 ]; then
     printf 'workspace-sandbox: could not read the login shell environment\\n' >&2
     return 0
@@ -123,7 +137,7 @@ capture_env() {
   (
     umask 077
     {
-      printf '#container=%s\\n' "$container_id"
+      printf '#sandbox=%s\\n' "$id"
       printf '%s\\n' "$output" | sed -n "/^$marker\\$/,/^$marker\\$/p" | sed '1d;$d' |
         grep -v "$(printf '\\001')" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' |
         grep -Ev '^(PWD|OLDPWD|SHLVL|_|TERM|PS1|PS2|PS4|COLUMNS|LINES)='
@@ -131,33 +145,45 @@ capture_env() {
   ) && mv "$tmp" "$env_file"
 }
 
-env_file_arg=
+captured=
 if [ "$mode" = terminal ] && [ $# -eq 0 ]; then
   set -- sh -c "$login_shell" sh
 else
   capture_env
-  [ -f "$env_file" ] && env_file_arg=$env_file
+  [ -f "$env_file" ] && captured=$env_file
 fi
 [ $# -gt 0 ] || fail "missing command"
 
-# Killing \`exec\`'s client does not stop the process inside the container, so record its pid and
-# forward signals to it. Background jobs read /dev/null unless stdin is passed explicitly.
+# This launch's environment: the captured one, then the forwarded variables, which win. A file
+# readable only by you keeps values out of the engine's command line where it can read one.
+launch_env=$(mktemp "\${TMPDIR:-/tmp}/paseo-sandbox-env.XXXXXX") || fail "could not create a temporary file"
+newline='
+'
+{
+  [ -n "$captured" ] && grep -v '^#' "$captured"
+  for name in $forwarded; do
+    eval "value=\\\${$name}"
+    case $value in *"$newline"*) continue ;; esac
+    printf '%s=%s\\n' "$name" "$value"
+  done
+} >"$launch_env"
+
+if [ "$sandbox_tracks_pid" != 1 ]; then
+  sandbox_exec "$launch_env" "$tty" "$workdir" -- "$@"
+  exit 126
+fi
+
+# Killing the engine's exec client does not stop the process inside the sandbox, so record its pid
+# and forward signals to it. Background jobs read /dev/null unless stdin is passed explicitly.
 pid_file=/tmp/paseo-sandbox-$$.pid
 exec 3<&0
-# Forwarded variables come after the env file, so this launch's values win.
-# shellcheck disable=SC2086
-"$sandbox_cli" exec -i $tty_flag \${env_file_arg:+--env-file} \${env_file_arg:+"$env_file_arg"} $env_args \\
-  -w "$workdir" "$sandbox_container" \\
-  sh -c 'echo $$ > "$0"; exec "$@"' "$pid_file" "$@" <&3 3<&- &
+sandbox_exec "$launch_env" "$tty" "$workdir" -- sh -c 'echo $$ > "$0"; exec "$@"' "$pid_file" "$@" <&3 3<&- &
 child=$!
 exec 3<&-
 
-forward() {
-  "$sandbox_cli" exec "$sandbox_container" sh -c 'kill -s "$1" "$(cat "$0")" 2>/dev/null' "$pid_file" "$1" >/dev/null 2>&1
-}
-trap 'forward TERM' TERM
-trap 'forward INT' INT
-trap 'forward HUP' HUP
+trap 'sandbox_signal TERM "$pid_file" >/dev/null 2>&1' TERM
+trap 'sandbox_signal INT "$pid_file" >/dev/null 2>&1' INT
+trap 'sandbox_signal HUP "$pid_file" >/dev/null 2>&1' HUP
 
 status=0
 while :; do
@@ -165,7 +191,8 @@ while :; do
   status=$?
   kill -0 "$child" 2>/dev/null || break
 done
-"$sandbox_cli" exec "$sandbox_container" rm -f "$pid_file" >/dev/null 2>&1
+sandbox_cleanup "$pid_file" >/dev/null 2>&1
+rm -f "$launch_env"
 exit "$status"
 `;
 }

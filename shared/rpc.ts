@@ -1,13 +1,48 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
-/** A saved container configuration. Each workspace keeps a copy of the one it was created with. */
+/**
+ * What runs a workspace's sandbox. Podman, Docker, microsandbox, and BoxLite keep one long-lived
+ * sandbox per workspace from an image; Bubblewrap starts a fresh one for each launch from the host's
+ * own system, read-only.
+ */
+export const ENGINES = ["podman", "docker", "bubblewrap", "microsandbox", "boxlite"] as const;
+export const EngineSchema = z.enum(ENGINES);
+export type Engine = z.infer<typeof EngineSchema>;
+
+const ENGINE_LABELS: Record<Engine, string> = {
+  podman: "Podman",
+  docker: "Docker",
+  bubblewrap: "Bubblewrap",
+  microsandbox: "microsandbox",
+  boxlite: "BoxLite",
+};
+
+/** "Podman · node:22", or "Bubblewrap · host system"; profiles from before engines show the image. */
+export function describeProfile(profile: { engine?: Engine; image: string }): string {
+  if (!profile.engine) return profile.image;
+  const what = engineUsesImage(profile.engine) ? profile.image : "host system";
+  return `${ENGINE_LABELS[profile.engine]} · ${what}`;
+}
+
+/** Engines that run an image. */
+export function engineUsesImage(engine: Engine): boolean {
+  return engine !== "bubblewrap";
+}
+
+/** A saved sandbox configuration. Each workspace keeps a copy of the one it was created with. */
 export const ContainerProfileSchema = z.object({
   id: z.string().min(1),
   name: z.string().trim().min(1, "Enter a name"),
-  // Must contain the agent CLIs (claude, codex), or receive them through extraMounts.
-  image: z.string().trim().min(1, "Enter an image"),
-  // Agents reach the daemon's MCP endpoint on loopback, so "host" keeps Paseo tools working.
+  /** Profiles saved before engines take the engine of the old global container CLI setting. */
+  engine: EngineSchema.optional(),
+  /** The engine's command, when not the default on PATH (`podman`, `docker`, `bwrap`, `msb`, `boxlite`). */
+  cli: z.string().trim().optional(),
+  // Must contain the agent CLIs (claude, codex), or receive them through extraMounts. Bubblewrap
+  // uses the host's system instead and ignores it.
+  image: z.string().trim(),
+  // Each engine maps these to its own options; see the README. "host" lets agents reach the
+  // daemon's MCP endpoint on loopback.
   network: z.enum(["host", "bridge", "none"]),
   // Host paths, one per line or comma separated, mounted at the same path. ":ro" for read-only.
   extraMounts: z.string(),

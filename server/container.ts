@@ -1,21 +1,23 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
 import { execCommand } from "@getpaseo/plugin/server";
-import type { ContainerStatus, SandboxRecord } from "../shared/rpc";
+import type { Engine, SandboxRecord } from "../shared/rpc";
 
+/** An engine, its command, and the parts of a sandbox's profile every engine reads. */
 export interface ContainerPolicy {
-  /** Absolute path of the docker-compatible CLI. */
+  engine: Engine;
+  /** Absolute path of the engine's command. */
   cli: string;
   network: "host" | "bridge" | "none";
   extraMounts: string;
   extraRunArgs: string;
 }
 
-interface Mount {
-  /** Where the container sees it. */
+export interface Mount {
+  /** Where the sandbox sees it. */
   path: string;
   /** The host path, when it differs from `path`. */
   source?: string;
@@ -23,11 +25,11 @@ interface Mount {
 }
 
 /**
- * The Claude config folder a container uses. A private one belongs to the workspace and signs in
+ * The Claude config folder a sandbox uses. A private one belongs to the workspace and signs in
  * through `apiKeyHelper` with the token file in `authDir`; a shared one is the host's folder.
  */
 export type ClaudeHome =
-  /** No Claude folder: the container that checks what the user's own mounts expose. */
+  /** No Claude folder: the sandbox that checks what the user's own mounts expose. */
   | { mode: "none" }
   | { mode: "shared"; configDir: string }
   | {
@@ -50,32 +52,89 @@ export const SHARED_CLAUDE_ENTRIES = [
   { name: "output-styles", kind: "directory" },
 ] as const;
 
-// Keeps the container alive without depending on `sleep infinity`, which busybox lacks.
-const KEEPALIVE = 'trap "exit 0" TERM; while :; do sleep 3600 & wait $!; done';
+/** A workspace's sandbox. */
+export interface ContainerTarget {
+  /** The engine's name for it; Bubblewrap, which keeps no sandbox between launches, ignores it. */
+  container: string;
+  /** `paseo.workspace-sandbox.<key>=<value>`, so every plugin sandbox can be found. */
+  label: string;
+  image: string;
+  /** Mounted read-write with its git metadata. */
+  workspace: string;
+  workdir: string;
+  claude: ClaudeHome;
+}
 
 export function containerName(workspaceId: string): string {
   return `paseo-sandbox-${workspaceId.replace(/[^A-Za-z0-9_.-]/g, "-")}`;
 }
 
-async function which(command: string): Promise<string | null> {
+export function workspaceTarget(record: SandboxRecord, claude: ClaudeHome): ContainerTarget {
+  return {
+    container: record.container,
+    label: `workspace=${record.workspaceId}`,
+    image: record.image,
+    workspace: record.cwd,
+    workdir: record.cwd,
+    claude,
+  };
+}
+
+/**
+ * Earlier versions answered model discovery from this container, one per data directory. It is
+ * removed when the plugin starts.
+ */
+export function legacyProbeContainerName(dataDirectory: string): string {
+  const digest = createHash("sha256").update(dataDirectory).digest("hex").slice(0, 10);
+  return `paseo-sandbox-probe-${digest}`;
+}
+
+export async function which(command: string): Promise<string | null> {
   const { stdout } = await execCommand("sh", ["-c", 'command -v "$1" || true', "sh", command]);
   return stdout.trim() || null;
 }
 
-export async function resolveCli(command: string): Promise<string> {
-  const resolved = path.isAbsolute(command) ? command : await which(command);
-  if (!resolved) throw new Error(`Container CLI "${command}" was not found on PATH`);
-  // podman-docker's `docker` prints a notice on every call, which would land in sandboxed
-  // terminals. Call podman itself when that is what `docker` runs.
-  if (path.basename(resolved) === "docker" && (await isPodman(resolved))) {
-    return (await which("podman")) ?? resolved;
-  }
-  return resolved;
-}
-
-async function isPodman(cli: string): Promise<boolean> {
+export async function isPodman(cli: string): Promise<boolean> {
   const { stdout } = await execCommand(cli, ["--version"]);
   return /podman/i.test(stdout);
+}
+
+export function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * The CLI's last error line, such as an image that cannot be pulled. The full message repeats the
+ * whole command and any retries; it stays available as `cause`.
+ */
+export function cliError(error: unknown): Error {
+  const stderr =
+    typeof error === "object" && error !== null && "stderr" in error ? String(error.stderr) : "";
+  const lines = stderr
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const last = lines[lines.length - 1];
+  if (!last) return error instanceof Error ? error : new Error(String(error));
+  return new Error(last.replace(/^Error:\s*/i, ""), { cause: error });
+}
+
+/** Runs an engine command, reporting a failure by the CLI's last error line. */
+export async function runCli(
+  cli: string,
+  args: string[],
+  options: { long?: boolean } = {},
+): Promise<string> {
+  try {
+    const { stdout } = await execCommand(cli, args, {
+      // A first run may pull an image, so allow far longer than the default exec timeout.
+      ...(options.long ? { timeout: 15 * 60_000 } : {}),
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return stdout;
+  } catch (error) {
+    throw cliError(error);
+  }
 }
 
 async function gitCommonDirectory(cwd: string): Promise<string | null> {
@@ -107,38 +166,6 @@ export function parseExtraMounts(value: string): Mount[] {
     });
 }
 
-/** A workspace's sandbox container. */
-export interface ContainerTarget {
-  container: string;
-  /** `paseo.workspace-sandbox.<key>=<value>`, so every plugin container can be found. */
-  label: string;
-  image: string;
-  /** Mounted read-write with its git metadata. */
-  workspace: string;
-  workdir: string;
-  claude: ClaudeHome;
-}
-
-export function workspaceTarget(record: SandboxRecord, claude: ClaudeHome): ContainerTarget {
-  return {
-    container: record.container,
-    label: `workspace=${record.workspaceId}`,
-    image: record.image,
-    workspace: record.cwd,
-    workdir: record.cwd,
-    claude,
-  };
-}
-
-/**
- * Earlier versions answered model discovery from this container, one per data directory. It is
- * removed when the plugin starts.
- */
-export function legacyProbeContainerName(dataDirectory: string): string {
-  const digest = createHash("sha256").update(dataDirectory).digest("hex").slice(0, 10);
-  return `paseo-sandbox-probe-${digest}`;
-}
-
 async function workspaceMounts(cwd: string): Promise<Mount[]> {
   const mounts: Mount[] = [{ path: cwd, readOnly: false }];
   const commonDir = await gitCommonDirectory(cwd);
@@ -157,10 +184,10 @@ async function workspaceMounts(cwd: string): Promise<Mount[]> {
 }
 
 /**
- * The CLI refuses two mounts at one destination, but it mounts parents before children whatever
- * the order, so extra mounts may contain the plugin's: `~:ro` keeps the workspace read-write.
- * At the same path the plugin's mount wins, keeping the workspace writable and git hooks and
- * config read-only; between extra mounts, read-only wins.
+ * Engines refuse two mounts at one destination, and mount parents before children (Bubblewrap
+ * gets them sorted), so extra mounts may contain the plugin's: `~:ro` keeps the workspace
+ * read-write. At the same path the plugin's mount wins, keeping the workspace writable and git hooks
+ * and config read-only; between extra mounts, read-only wins.
  */
 function addExtraMounts(mounts: Mount[], extra: readonly Mount[]): Mount[] {
   const owned = new Set(mounts.map((mount) => mount.path));
@@ -199,7 +226,11 @@ function claudeMounts(claude: ClaudeHome): Mount[] {
   return mounts;
 }
 
-async function resolveMounts(target: ContainerTarget, policy: ContainerPolicy): Promise<Mount[]> {
+/** Everything a workspace's sandbox mounts, at the same absolute paths as on the host. */
+export async function resolveMounts(
+  target: ContainerTarget,
+  policy: ContainerPolicy,
+): Promise<Mount[]> {
   const extra = parseExtraMounts(policy.extraMounts);
   const mounts = await workspaceMounts(target.workspace);
   mounts.push(...claudeMounts(target.claude));
@@ -216,191 +247,27 @@ async function resolveMounts(target: ContainerTarget, policy: ContainerPolicy): 
   return addExtraMounts(mounts, extra);
 }
 
-/** Everything between `run` and the image, shared by the sandbox and its Claude folder check. */
-async function containerOptions(
-  target: ContainerTarget,
-  policy: ContainerPolicy,
-): Promise<string[]> {
-  const home = homedir();
-  const user = userInfo();
-  const identity = (await isPodman(policy.cli))
-    ? ["--userns=keep-id"]
-    : ["--user", `${user.uid}:${user.gid}`];
-  const mounts = (await resolveMounts(target, policy)).flatMap((mount) => [
-    "-v",
-    `${mount.source ?? mount.path}:${mount.path}${mount.readOnly ? ":ro" : ""}`,
-  ]);
+/** The environment every engine gives its sandbox, besides what each launch forwards. */
+export function baseEnvironment(target: ContainerTarget): Array<[string, string]> {
   const { claude } = target;
   const plugins = claude.mode === "private" ? path.join(claude.hostConfigDir, "plugins") : null;
   return [
-    "--network",
-    policy.network,
-    ...identity,
-    "--workdir",
-    target.workdir,
-    // HOME keeps the host path so mounted credentials resolve. Unless an extra mount covers it, the
-    // engine creates it root-owned as the parent of those mounts, so only they are writable.
-    "-e",
-    `HOME=${home}`,
-    "-e",
-    `USER=${user.username}`,
+    // HOME keeps the host path so mounted credentials resolve.
+    ["HOME", homedir()],
+    ["USER", userInfo().username],
     // Keeps Claude's .claude.json inside the mounted directory instead of a bind-mounted file,
     // which Claude replaces by rename.
-    ...(claude.mode === "none" ? [] : ["-e", `CLAUDE_CONFIG_DIR=${claude.configDir}`]),
+    ...(claude.mode === "none"
+      ? []
+      : [["CLAUDE_CONFIG_DIR", claude.configDir] as [string, string]]),
     // A private folder installs nothing itself: Claude Code reads the host's plugins as a seed.
-    ...(plugins && existsSync(plugins) ? ["-e", `CLAUDE_CODE_PLUGIN_SEED_DIR=${plugins}`] : []),
-    ...mounts,
-    ...policy.extraRunArgs.split(/\s+/).filter(Boolean),
+    ...(plugins && existsSync(plugins)
+      ? [["CLAUDE_CODE_PLUGIN_SEED_DIR", plugins] as [string, string]]
+      : []),
   ];
 }
 
-export async function buildRunArgs(
-  target: ContainerTarget,
-  policy: ContainerPolicy,
-): Promise<string[]> {
-  return [
-    "run",
-    "-d",
-    "--name",
-    target.container,
-    "--label",
-    `paseo.workspace-sandbox.${target.label}`,
-    "--init",
-    ...(await containerOptions(target, policy)),
-    target.image,
-    "sh",
-    "-c",
-    KEEPALIVE,
-  ];
-}
-
-// Prints how the host's Claude folder appears in the container. The device and inode tell the
-// host folder apart from one the image, a named volume, or a tmpfs puts at the same path; creating
-// a file tests writes through read-only mounts, permissions, and user-namespace mapping alike.
-const CLAUDE_FOLDER_CHECK = [
-  "dir=$1; expected=$2",
-  '[ -d "$dir" ] || { echo absent; exit 0; }',
-  'id=$(stat -c %d:%i "$dir" 2>/dev/null) || { echo unknown; exit 0; }',
-  '[ "$id" = "$expected" ] || { echo other; exit 0; }',
-  'probe="$dir/.paseo-sandbox-write-check-$$"',
-  'if (umask 077; : > "$probe") 2>/dev/null; then rm -f "$probe"; echo writable; else echo read-only; fi',
-].join("\n");
-
-export type ClaudeFolderAccess = "writable" | "read-only" | "other" | "absent" | "unknown";
-
-/**
- * Runs the sandbox's configuration (image, user mapping, workspace and extra mounts, extra run
- * arguments) without any Claude folder of the plugin's, and reports how the host's Claude folder
- * shows. The first run pulls the image, which the sandbox then reuses.
- */
-export async function checkClaudeFolder(
-  target: ContainerTarget,
-  policy: ContainerPolicy,
-  hostConfigDir: string,
-): Promise<ClaudeFolderAccess> {
-  const info = await stat(hostConfigDir);
-  const args = [
-    "run",
-    "--rm",
-    "--label",
-    "paseo.workspace-sandbox.check=1",
-    ...(await containerOptions({ ...target, claude: { mode: "none" } }, policy)),
-    target.image,
-    "sh",
-    "-c",
-    CLAUDE_FOLDER_CHECK,
-    "sh",
-    hostConfigDir,
-    `${info.dev}:${info.ino}`,
-  ];
-  let stdout: string;
-  try {
-    ({ stdout } = await execCommand(policy.cli, args, {
-      timeout: 15 * 60_000,
-      maxBuffer: 16 * 1024 * 1024,
-    }));
-  } catch (error) {
-    throw cliError(error);
-  }
-  const answer = stdout.trim().split("\n").pop()?.trim();
-  return answer === "writable" ||
-    answer === "read-only" ||
-    answer === "other" ||
-    answer === "absent"
-    ? answer
-    : "unknown";
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-/**
- * Sourced by sandbox-run, which only joins a running container: the plugin starts and recreates
- * containers, and waits for them before every agent and terminal launch.
- */
-export function renderSpec(input: { cli: string; container: string; workdir: string }): string {
-  return [
-    `# Generated by the workspace-sandbox plugin.`,
-    `sandbox_cli=${shellQuote(input.cli)}`,
-    `sandbox_container=${shellQuote(input.container)}`,
-    `sandbox_workdir=${shellQuote(input.workdir)}`,
-    "",
-  ].join("\n");
-}
-
-export async function inspectContainer(cli: string, name: string): Promise<ContainerStatus> {
-  try {
-    const { stdout } = await execCommand(cli, [
-      "container",
-      "inspect",
-      "--format",
-      "{{.State.Running}}",
-      name,
-    ]);
-    return stdout.trim() === "true" ? { state: "running" } : { state: "stopped" };
-  } catch {
-    return { state: "missing" };
-  }
-}
-
-/**
- * The CLI's last error line, such as an image that cannot be pulled. The full message repeats the
- * whole run command and the pull's retries; it stays available as `cause`.
- */
-function cliError(error: unknown): Error {
-  const stderr =
-    typeof error === "object" && error !== null && "stderr" in error ? String(error.stderr) : "";
-  const lines = stderr
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const last = lines[lines.length - 1];
-  if (!last) return error instanceof Error ? error : new Error(String(error));
-  return new Error(last.replace(/^Error:\s*/i, ""), { cause: error });
-}
-
-export async function startContainer(
-  cli: string,
-  name: string,
-  runArgs: string[],
-): Promise<ContainerStatus> {
-  const current = await inspectContainer(cli, name);
-  if (current.state === "running") return current;
-  try {
-    if (current.state === "stopped") await execCommand(cli, ["start", name]);
-    // The first run may pull the image, so allow far longer than the default exec timeout.
-    else await execCommand(cli, runArgs, { timeout: 15 * 60_000, maxBuffer: 16 * 1024 * 1024 });
-  } catch (error) {
-    throw cliError(error);
-  }
-  return inspectContainer(cli, name);
-}
-
-export async function removeContainer(cli: string, name: string): Promise<void> {
-  try {
-    await execCommand(cli, ["rm", "-f", name]);
-  } catch (error) {
-    if ((await inspectContainer(cli, name)).state !== "missing") throw error;
-  }
+/** Extra run arguments split on whitespace, as each engine receives them. */
+export function extraArguments(policy: ContainerPolicy): string[] {
+  return policy.extraRunArgs.split(/\s+/).filter(Boolean);
 }

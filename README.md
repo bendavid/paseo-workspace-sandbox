@@ -1,6 +1,8 @@
 # Workspace sandbox
 
-Prototype: one container per workspace, using only the existing plugin API.
+Prototype: one sandbox per workspace, using only the existing plugin API. A sandbox is a container
+(Podman, Docker), a microVM (microsandbox, BoxLite), or a Bubblewrap namespace sandbox; see
+[Engines](#engines).
 
 - **New sandboxed workspace** (sidebar header, Command Center, or the workspace-context command
   that preselects the current project) is laid out like New workspace: project, isolation,
@@ -16,7 +18,7 @@ Prototype: one container per workspace, using only the existing plugin API.
   Sessions, permissions, and history work as usual.
 - A **Sandboxed** header button opens the Sandbox panel, which shows a workspace's container and
   its configuration and has **Open sandboxed terminal**. The terminal button beside it opens a menu
-  of a terminal and your terminal profiles, run in the container. Settings > Sandbox holds the container CLI and the saved profiles. Archiving the
+  of a terminal and your terminal profiles, run in the container. Settings > Sandbox holds the saved profiles. Archiving the
   workspace removes its container.
 - The badge reads **Sandbox starting** until the container is up, then **Sandboxed**, or
   **Sandbox failed**. See [Start failures](#start-failures).
@@ -91,16 +93,48 @@ Each of these launches tries again, and a container that then runs clears the fa
 
 ## Container profiles
 
-A profile is a saved container configuration: image, network, extra mounts, and extra run
-arguments. A new sandboxed workspace copies the profile chosen in the form, so editing or deleting
+A profile is a saved sandbox configuration: [engine](#engines) and its command, image, network,
+extra mounts, and extra run arguments. A new sandboxed workspace copies the profile chosen in the form, so editing or deleting
 a profile never changes an existing workspace's container; the Sandbox panel shows the copy.
 
 - The form's **Container** dropdown lists the profiles, with **New profile** (prefilled from the
   selected one) and **Edit** at the bottom. Settings > Sandbox lists them too.
 - The default profile is preselected. At least one profile stays.
 - Profiles live in `container-profiles.json` in the plugin's data directory. On first start, a
-  "Default" profile is created from the settings that predate profiles.
-- The container CLI is one setting for every sandbox.
+  "Default" profile is created from the settings that predate profiles. Profiles saved before
+  engines get the engine of the old global container CLI setting: Podman when that is what it runs.
+
+## Engines
+
+| Engine       | Sandbox                          | Image | Network: Host / Separate / None                                                        | Tested                |
+| ------------ | -------------------------------- | ----- | -------------------------------------------------------------------------------------- | --------------------- |
+| Podman       | One container per workspace      | Yes   | `--network host` / `bridge` / `none`                                                   | Yes                   |
+| Docker       | One container per workspace      | Yes   | as Podman                                                                              | Through podman-docker |
+| Bubblewrap   | One namespace sandbox per launch | No    | host network / host network / `--unshare-net`                                          | Yes                   |
+| microsandbox | One microVM per workspace        | Yes   | `--net all` / `--net public` / `--no-net`                                              | No                    |
+| BoxLite      | One microVM per workspace        | Yes   | its own network (host loopback: `host.boxlite.internal`) / same / `--network disabled` | No                    |
+
+The profile's **Command** is the engine's executable; empty means the default (`podman`, `docker`,
+`bwrap`, `msb`, `boxlite`) on PATH, or where the microVM installers put it. Container runtimes such
+as krun, gVisor, or Kata go in **Extra run arguments** (`--runtime krun`).
+
+- **Podman and Docker** keep a long-lived container that launches join with `exec`. Podman runs with
+  `--userns=keep-id` and Docker with `--user <uid>:<gid>`, so files keep your ownership.
+- **Bubblewrap** has no image and nothing long-lived: each launch is a fresh sandbox with the host's
+  `/usr`, `/etc`, and `/opt` read-only, its own `/proc`, `/dev`, `/tmp`, and `/run`, the sandbox's
+  mounts, and a clean environment. Tools are the host's own. Bubblewrap applies mounts in order, so
+  the plugin sorts them parents first. The home directory is a scratch folder for the launch unless
+  a mount covers it. It needs unprivileged user namespaces; "starting" runs `true` in one, so a host
+  without them fails as a start failure. Extra run arguments are added to `bwrap`.
+- **microsandbox and BoxLite** keep a libkrun microVM per workspace and join it with `exec`, sharing
+  host folders over virtio-fs at the same paths and running commands as your uid. Environment
+  variables reach them as `-e NAME=VALUE`, so their values appear on the engine's command line; the
+  container engines read a private file instead. libkrun does not confine a guest to a shared
+  folder's subtree, so share narrow folders. Neither is tested yet: the flags follow their documented
+  CLIs, and `inspect` output is matched loosely.
+
+The [Claude folder check](#claude-folders) uses a marker file the host creates, not device and
+inode numbers, which a microVM's virtio-fs does not preserve.
 
 ## Directory sandboxes
 
@@ -152,7 +186,8 @@ the plugin removes it when it starts.
 
 ## Image
 
-The "Default" profile's image, `node:22-bookworm-slim`, has no agent CLIs. Build one that installs
+Engines other than Bubblewrap run an image. The "Default" profile's image, `node:22-bookworm-slim`,
+has no agent CLIs. Build one that installs
 them, or mount them from the host with **Extra mounts**. A mounted CLI must be on the `PATH` the
 sandboxed terminal's shell builds (see [Commands see the terminal's environment](#commands-see-the-terminals-environment)),
 or add it with `--env-merge PATH=/its/dir:${PATH}` under **Extra run arguments** (Podman only;
@@ -164,7 +199,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
  && npm install -g @anthropic-ai/claude-code @openai/codex
 ```
 
-Each container mounts, at the same absolute paths:
+Each sandbox mounts, at the same absolute paths:
 
 | Path                                        | Access     | Why                                                   |
 | ------------------------------------------- | ---------- | ----------------------------------------------------- |
@@ -174,18 +209,18 @@ Each container mounts, at the same absolute paths:
 | The workspace's own Claude folder           | read-write | See [Claude folders](#claude-folders)                 |
 | `~/.codex`, `~/.copilot`, `~/.pi`, `~/.omp` | read-write | Credentials, and history the daemon reads on the host |
 
-`HOME` keeps the host path, but nothing else of the home directory is mounted. The container engine
-creates it owned by root as the parent of the provider directories, so it is not writable: tools
+`HOME` keeps the host path, but nothing else of the home directory is mounted. A container engine
+creates it owned by root as the parent of the provider directories, so it is not writable (in
+Bubblewrap it is a scratch folder for the launch): tools
 that write elsewhere in `~`, such as `npm`'s cache, `~/.cache`, or `~/.config`, fail until you add
 those directories, or `~` itself, under extra mounts.
 
-Extra mounts may contain the mounts above. The container CLI mounts parents before children whatever
-the order, so `~:ro` gives a read-only home around a read-write workspace and provider directories.
+Extra mounts may contain the mounts above. Engines mount parents before children whatever the order
+(the plugin sorts them for Bubblewrap), so `~:ro` gives a read-only home around a read-write workspace and provider directories.
 At a path the plugin already mounts, the plugin's access wins, so the workspace stays writable and
 git hooks and config stay read-only. Two extra mounts of one path are read-only if either is.
 
-Podman runs with `--userns=keep-id` and Docker with `--user <uid>:<gid>`, so files keep your
-ownership. The default host network lets agents reach the daemon's MCP endpoint on loopback.
+The default host network lets agents reach the daemon's MCP endpoint on loopback.
 
 ## Claude folders
 
@@ -283,11 +318,12 @@ only after removing the profiles from `config.json`.
 | Model/version probe          | none                                                      | Host CLI                     |
 | Sandboxed terminal           | `PASEO_WORKSPACE_ID`, set on every terminal               | Fails                        |
 
-The spec names only the CLI, the container, and its working directory: `sandbox-run` joins the
-container the plugin started and fails when it isn't running. It forwards only `PASEO_*`, provider,
-and locale variables. Killing the `exec` client does
-not stop the process inside the container, so the wrapper records the inner pid and forwards
-`TERM`, `INT`, and `HUP`.
+The spec holds the engine's part of `sandbox-run`: a few shell functions (ready, ID, run a command
+inside, signal), documented at the top of `server/wrapper.ts`. `sandbox-run` joins the sandbox the
+plugin started and fails when it isn't ready. It forwards only `PASEO_*`, provider, and locale
+variables. Killing a long-lived engine's `exec` client does not stop the process inside, so the
+wrapper records the inner pid and forwards `TERM`, `INT`, and `HUP`; Bubblewrap's launch replaces
+the wrapper and dies with it.
 
 ## Not sandboxed
 

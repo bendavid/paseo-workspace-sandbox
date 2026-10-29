@@ -37,6 +37,8 @@ export default function contribute(server: PluginServerContext) {
     await login.start().catch((error) => console.error("Claude login keeper failed", error));
     const service = new SandboxService(store, settings, containerProfiles, login, wrapper);
     await containerProfiles.load(() => service.profileSeed());
+    const legacy = await service.profileEngineFromSettings();
+    await containerProfiles.fillEngines(legacy.engine, legacy.cli);
     // Model discovery and version checks for sandboxed providers run the host's CLI, assumed to
     // match the sandboxes'. Earlier versions ran them in a probe container.
     service
