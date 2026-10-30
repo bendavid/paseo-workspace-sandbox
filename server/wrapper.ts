@@ -123,7 +123,15 @@ capture_env() {
   out=$(mktemp "\${TMPDIR:-/tmp}/paseo-sandbox-capture.XXXXXX") || return 0
   ( sandbox_exec "" "" "$workdir" -- sh -c "$login_shell" sh -c "$capture" </dev/null >"$out" 2>/dev/null ) &
   capturing=$!
-  ( sleep 60; kill "$capturing" 2>/dev/null ) &
+  # Detached from this launch's input and output, which would otherwise stay open for the
+  # watchdog's sleep: an agent's protocol stream would not end until it did. Stopping it stops the
+  # sleep too.
+  (
+    trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+    sleep 60 &
+    sleeper=$!
+    wait "$sleeper" && kill "$capturing" 2>/dev/null
+  ) </dev/null >/dev/null 2>&1 &
   watchdog=$!
   wait "$capturing" 2>/dev/null
   kill "$watchdog" 2>/dev/null
