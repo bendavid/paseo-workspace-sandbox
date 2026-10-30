@@ -122,6 +122,11 @@ export class SandboxStore {
     await this.save();
   }
 
+  /** A sandboxed directory's link to its project directory: the workspace's own path. */
+  linkPath(workspaceId: string): string {
+    return path.join(this.directory, "links", workspaceId);
+  }
+
   specFile(workspaceId: string): string {
     return path.join(this.directory, "workspaces", `${workspaceId}.sh`);
   }

@@ -1,8 +1,19 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { lstat, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, expect, test } from "vitest";
-import { parseExtraMounts, resolveMounts, type ContainerPolicy } from "../server/container";
+import {
+  createLink,
+  linkMountPoints,
+  parseExtraMounts,
+  removeLink,
+  resolveMounts,
+  type ContainerPolicy,
+} from "../server/container";
+
+const execFileAsync = promisify(execFile);
 
 const roots: string[] = [];
 
@@ -61,4 +72,54 @@ test("refuses an extra mount that does not exist", async () => {
   await expect(resolveMounts(target, policy(path.join(root, "missing")))).rejects.toThrow(
     /does not exist/,
   );
+});
+
+async function sandboxedDirectory() {
+  const root = await mkdtemp(path.join(tmpdir(), "sandbox-linked-"));
+  roots.push(root);
+  const project = path.join(root, "project");
+  await mkdir(project, { recursive: true });
+  await writeFile(path.join(project, "README.md"), "hi\n");
+  await execFileAsync("git", ["init", "-q", project]);
+  const link = path.join(root, "data", "links", "wks_1");
+  await createLink(link, project);
+  const target = {
+    container: "test",
+    label: "workspace=wks_1",
+    image: "",
+    workspace: link,
+    workdir: link,
+    claude: { mode: "none" as const },
+    linkedDirectory: project,
+  };
+  return { root, project, link, target };
+}
+
+test("a sandboxed directory is mounted at its link and its real path, with no git mounts", async () => {
+  const { root, project, link, target } = await sandboxedDirectory();
+  const mounts = (await resolveMounts(target, policy(""))).filter((mount) =>
+    mount.path.startsWith(root),
+  );
+  expect(mounts).toEqual([
+    { path: project, readOnly: false },
+    { path: path.dirname(link), source: linkMountPoints(link), readOnly: true },
+    { path: link, source: project, readOnly: false },
+  ]);
+  // The mount point exists before the engine needs it.
+  expect((await lstat(path.join(linkMountPoints(link), "wks_1"))).isDirectory()).toBe(true);
+});
+
+test("a sandboxed directory's link is recreated when missing", async () => {
+  const { project, link, target } = await sandboxedDirectory();
+  await rm(link);
+  await resolveMounts(target, policy(""));
+  expect(await readlink(link)).toBe(project);
+});
+
+test("removing a link leaves the project directory alone", async () => {
+  const { project, link } = await sandboxedDirectory();
+  await removeLink(link);
+  expect(await lstat(link).catch(() => null)).toBeNull();
+  expect(await lstat(linkMountPoints(link)).catch(() => null)).toBeNull();
+  expect(await readFile(path.join(project, "README.md"), "utf8")).toBe("hi\n");
 });

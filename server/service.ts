@@ -13,6 +13,8 @@ import type { ImageStore } from "./backends/types";
 import { checkImage } from "./registry";
 import {
   containerName,
+  createLink,
+  removeLink,
   shellQuote,
   workspaceTarget,
   type ClaudeHome,
@@ -67,14 +69,15 @@ async function listActiveWorkspaceIds(paseo: PaseoApi): Promise<Set<string>> {
 }
 
 /**
- * A worktree sandbox gets a directory of its own. A directory sandbox is a new workspace on the
- * project directory, shared with the project's other workspaces, so it gets a title that tells
- * the two apart.
+ * A worktree sandbox gets a directory of its own. A directory sandbox is a new workspace at its
+ * link to the project directory, which the project's other workspaces share, so it gets a title
+ * that tells them apart.
  */
 function buildWorkspaceRequest(
   input: CreateInput,
   plan: {
     isolation: "worktree" | "directory";
+    link: string;
     project: {
       projectRootPath: string;
       projectCustomName?: string | null;
@@ -90,11 +93,7 @@ function buildWorkspaceRequest(
           action: "branch-off" as const,
           ...(input.baseRef ? { baseBranch: input.baseRef } : {}),
         }
-      : {
-          kind: "directory" as const,
-          path: plan.project.projectRootPath,
-          projectId: input.projectId,
-        };
+      : { kind: "directory" as const, path: plan.link, projectId: input.projectId };
   const defaultTitle =
     plan.isolation === "directory"
       ? `${plan.project.projectCustomName ?? plan.project.projectDisplayName} (sandboxed)`
@@ -378,6 +377,8 @@ export class SandboxService {
     paseo: PaseoApi,
   ): Promise<SandboxRecord> {
     const workspaceId = `wks_${randomBytes(8).toString("hex")}`;
+    const directory = plan.isolation === "directory";
+    const link = this.store.linkPath(workspaceId);
     const pending: SandboxRecord = {
       workspaceId,
       projectId: input.projectId,
@@ -387,13 +388,16 @@ export class SandboxService {
       profile: plan.profile,
       pending: true,
       claudeHome: "checking",
+      ...(directory ? { linkedDirectory: plan.project.projectRootPath } : {}),
     };
     this.creating.add(workspaceId);
     await this.store.put(pending);
+    if (directory) await createLink(link, plan.project.projectRootPath);
     const workspace = await paseo.workspaces
-      .create({ workspaceId, ...buildWorkspaceRequest(input, plan) })
+      .create({ workspaceId, ...buildWorkspaceRequest(input, { ...plan, link }) })
       .catch(async (error: unknown) => {
         await this.store.remove(workspaceId);
+        if (directory) await removeLink(link);
         throw error;
       })
       .finally(() => this.creating.delete(workspaceId));
@@ -540,6 +544,7 @@ export class SandboxService {
     this.failures.delete(workspaceId);
     const policy = await this.policy(record.profile);
     await backendFor(policy.engine).remove(workspaceTarget(record, { mode: "none" }), policy);
+    if (record.linkedDirectory) await removeLink(this.store.linkPath(workspaceId));
   }
 
   /** Finishes a record left pending when the daemon stopped while creating its workspace. */

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir, rm, symlink } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
 import { execCommand } from "@getpaseo/plugin/server";
@@ -62,6 +62,8 @@ export interface ContainerTarget {
   workspace: string;
   workdir: string;
   claude: ClaudeHome;
+  /** For a sandboxed directory, the project directory `workspace` links to. */
+  linkedDirectory?: string;
 }
 
 export function containerName(workspaceId: string): string {
@@ -76,7 +78,29 @@ export function workspaceTarget(record: SandboxRecord, claude: ClaudeHome): Cont
     workspace: record.cwd,
     workdir: record.cwd,
     claude,
+    ...(record.linkedDirectory ? { linkedDirectory: record.linkedDirectory } : {}),
   };
+}
+
+/**
+ * A sandboxed directory's folder of mount points, mounted over the folder of links: it holds only
+ * this sandbox's own, empty, so the link path is a plain mount point inside the sandbox.
+ */
+export function linkMountPoints(link: string): string {
+  return path.join(path.dirname(path.dirname(link)), "link-mounts", path.basename(link));
+}
+
+/** Creates a sandboxed directory's link, replacing a stale one. */
+export async function createLink(link: string, directory: string): Promise<void> {
+  await mkdir(path.dirname(link), { recursive: true });
+  await rm(link, { force: true });
+  await symlink(directory, link);
+}
+
+/** Removes a sandboxed directory's link and mount points; never what the link points to. */
+export async function removeLink(link: string): Promise<void> {
+  await rm(link, { force: true });
+  await rm(linkMountPoints(link), { recursive: true, force: true });
 }
 
 export async function which(command: string): Promise<string | null> {
@@ -156,6 +180,26 @@ export function parseExtraMounts(value: string): Mount[] {
     });
 }
 
+/**
+ * A sandboxed directory shares the project directory with the host's workspaces by design, so
+ * there is no git handling. The agent runs at the link path the daemon knows the workspace by, so
+ * the project is mounted there as a directory, and at its real path too, for files that hold it:
+ * virtual environments, absolute symlinks, build caches. An extra mount covering the folder of
+ * links would show the link there as a symlink, which engines follow at a mount's destination; the
+ * sandbox's own folder of mount points, mounted over it, prevents that.
+ */
+async function linkedDirectoryMounts(link: string, directory: string): Promise<Mount[]> {
+  const mountPoints = linkMountPoints(link);
+  await mkdir(path.join(mountPoints, path.basename(link)), { recursive: true });
+  // Paseo archives a workspace whose directory is gone, but recreate a link removed meanwhile.
+  if (!(await lstat(link).catch(() => null))) await createLink(link, directory);
+  return [
+    { path: path.dirname(link), source: mountPoints, readOnly: true },
+    { path: link, source: directory, readOnly: false },
+    { path: directory, readOnly: false },
+  ];
+}
+
 async function workspaceMounts(cwd: string): Promise<Mount[]> {
   const mounts: Mount[] = [{ path: cwd, readOnly: false }];
   const commonDir = await gitCommonDirectory(cwd);
@@ -222,7 +266,9 @@ export async function resolveMounts(
   policy: ContainerPolicy,
 ): Promise<Mount[]> {
   const extra = parseExtraMounts(policy.extraMounts);
-  const mounts = await workspaceMounts(target.workspace);
+  const mounts = target.linkedDirectory
+    ? await linkedDirectoryMounts(target.workspace, target.linkedDirectory)
+    : await workspaceMounts(target.workspace);
   mounts.push(...claudeMounts(target.claude));
   // Agent credentials and session state for the providers the wrapper can launch. The daemon reads
   // history from these directories on the host, so sessions must be written to the same place.

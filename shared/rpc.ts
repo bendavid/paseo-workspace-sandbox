@@ -76,6 +76,12 @@ export const SandboxRecordSchema = z.object({
   /** The workspace's container configuration, copied from a profile when it was created. */
   profile: ContainerProfileSchema,
   /**
+   * A sandboxed directory's project directory. The workspace lives at a link to it in the plugin's
+   * data folder (`cwd`), so its agents and helpers are told apart from the project's other
+   * workspaces by directory. Sandboxed directories from before links use the project directory.
+   */
+  linkedDirectory: z.string().optional(),
+  /**
    * Registered under the workspace ID the plugin chose, before the workspace exists, so clients
    * that see the new workspace already find its sandbox. `cwd` is empty until creation returns.
    */

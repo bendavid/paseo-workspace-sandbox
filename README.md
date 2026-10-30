@@ -260,8 +260,9 @@ its tooltip, and the Sandbox panel shows the error. Agent launches and sandboxed
 failure. The daemon log has the engine's full output.
 
 The plugin keeps `bin/sandbox-run`, `state.json`, `container-profiles.json`, a `workspaces/<id>.sh`
-spec and its captured `.env` per sandbox, the private Claude folders in `homes/`, and the token and
-helper in `auth/`, in `$PASEO_HOME/plugin-data/workspace-sandbox`. The plugin cannot read its
+spec and its captured `.env` per sandbox, the private Claude folders in `homes/`, sandboxed
+directories' links in `links/` and `link-mounts/`, and the token and helper in `auth/`, in
+`$PASEO_HOME/plugin-data/workspace-sandbox`. The plugin cannot read its
 runtime ID, so the folder uses the manifest ID: install it once per daemon. Removing the plugin
 leaves the folder, and the provider profiles still point at `sandbox-run`, so sandboxed agents keep
 failing closed.
@@ -280,23 +281,33 @@ client does not stop the process inside, so the wrapper records the inner pid an
 
 ### Sandboxed directories
 
-**Sandboxed directory** is the sandboxed counterpart of New workspace's "Local": a new workspace on
-the project directory, titled `<project> (sandboxed)` unless you name it. Projects that are not Git
-repositories always get one.
+**Sandboxed directory** is the sandboxed counterpart of New workspace's "Local": a workspace on the
+project directory, titled `<project> (sandboxed)` unless you name it. Projects that are not Git
+repositories always get one. It shares the project directory with the project's other workspaces by
+design, so its sandbox does not protect `.git` the way a sandboxed worktree's does.
 
-The project's other workspaces share that directory. Each agent runs where its own workspace says:
-in its workspace's sandbox, or on the host when its workspace has none. Two sandboxed workspaces on
-one directory each use their own sandbox. The `agent.create` hook only sees an agent's directory,
-not its workspace, so a new agent of an unsandboxed workspace in that directory still gets the
-sandboxed provider, and the session hook, which does see the workspace, runs it on the host. Such an
-agent is labelled as sandboxed (for example "Claude Code (sandboxed)"), has Paseo tools disabled,
-and for ACP providers keeps Paseo's terminal and file access off. Agents that were already running
-there keep their host provider.
+The workspace lives at its own link to the project directory, `links/<workspace id>` in the
+plugin's data folder, and Paseo shows that path as its directory. The plugin's hooks only see an
+agent's directory when it is created, and commit-message and similar helpers only get a directory,
+so the link is what tells the sandboxed workspace's agents and helpers apart from the project's
+other workspaces, and two sandboxed directories on one project from each other. Agents of the other
+workspaces run in the real path and keep their own provider.
 
-When the daemon passes no workspace (agents saved without one, or a session resumed through the
-SDK's `resumeAgent`), the directory decides and the agent stays sandboxed. An agent whose workspace had a sandbox that is
-gone shows its history but does not run again; the plugin remembers removed sandboxes in
-`state.json` for this.
+Inside the sandbox the project is mounted at the link path, where the agent runs, and at its real
+path, so files that contain the real path keep working: virtual environments, absolute symlinks,
+build caches. An extra mount that covers the plugin's data folder, such as `~:ro`, would show the
+link there as a symlink, and engines follow a symlink at a mount's destination; each sandbox
+mounts its own `link-mounts/<workspace id>` over `links/`, so the link path stays a plain mount
+point. Archiving the workspace removes the link.
+
+Sandboxed directories created before links use the project directory itself. There, an agent of
+an unsandboxed workspace in that directory still gets the sandboxed provider at creation, and the
+session hook, which sees the workspace, runs it on the host, labelled as sandboxed (for example
+"Claude Code (sandboxed)"), with Paseo tools disabled and, for ACP providers, Paseo's terminal and
+file access off. When the daemon passes no workspace (agents saved without one, or a session
+resumed through the SDK's `resumeAgent`), the directory decides and the agent stays sandboxed. An
+agent whose workspace had a sandbox that is gone shows its history but does not run again; the
+plugin remembers removed sandboxes in `state.json` for this.
 
 ## Not sandboxed
 
@@ -310,7 +321,10 @@ The plugin covers what the plugin API reaches. Everything else still runs on the
   runs git there.
 - OpenCode and plugin-registered providers: creating one in a sandboxed workspace fails.
 - State for custom ACP agents outside the directories above, until added under extra mounts.
-- Title, branch, and commit message generation, which use the `metadataGeneration` providers.
+- Title, branch, commit message, and pull request text generation, which use the
+  `metadataGeneration` providers. Paseo runs these helpers for a directory, with a host provider,
+  so in a sandboxed workspace the plugin refuses them rather than run them on the host with its
+  content, and Paseo falls back to generic text such as "Update files".
 
 Agents saved with a host provider cannot reopen in a sandboxed workspace, and sandboxed profiles
 cannot run outside one; both fail with an explanation.
@@ -320,9 +334,10 @@ cannot run outside one; both fail with an explanation.
 - A terminal creation hook, so Paseo's own terminals, scripts, and setup could run in the sandbox.
 - A provider launch hook, so sandboxing a provider would not need a visible derived profile, and the
   requested provider would not have to be available on the host.
-- `agent.create` hooks that receive the agent's workspace, so agents of unsandboxed workspaces
-  sharing a sandbox's directory would keep their own provider, instead of running on the host with
-  the sandboxed provider's label and restrictions.
+- `agent.create` hooks that receive the agent's workspace, so routing would not depend on
+  directories, and sandboxed directories would not need links.
+- `agent.session_open` telling internal helpers apart, with the workspace they work for, so the
+  plugin could run a sandboxed workspace's commit-message and similar helpers in its sandbox.
 - `before("workspace.create")` with the workspace ID the daemon allocates, so Paseo's own New
   workspace form could create sandboxed workspaces.
 - A slot in the New workspace form, or access to the app's composer and combobox, instead of a
@@ -339,13 +354,16 @@ cannot run outside one; both fail with an explanation.
 npm install
 npm run typecheck
 npm test
+npm run test:e2e       # real sandboxes with each installed engine; never downloads images
 npm run format
 paseo plugin install "$PWD"
 paseo plugin reload workspace-sandbox   # after changes
 ```
 
 The unit tests use temporary folders and a fake `claude`; they never touch your own login or
-sandboxes.
+sandboxes. The end-to-end tests run throwaway sandboxes with Bubblewrap, and with Podman and
+microsandbox when `docker.io/library/node:22-bookworm-slim` is already present; an engine without
+it is skipped.
 
 ## License
 
