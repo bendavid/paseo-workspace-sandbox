@@ -4,6 +4,8 @@ A [Paseo](https://paseo.sh) plugin that runs a workspace's agents and terminals 
 sees only the workspace, your agents' own state, and the folders you add. A sandbox is a Podman or
 Docker container, a microsandbox microVM, or a Bubblewrap sandbox built from the host's system.
 
+![A sandboxed terminal running Debian in a Podman container, with the sandbox's terminal menu open](assets/screenshot-terminal-light.png)
+
 - **New sandboxed workspace** (sidebar header, Command Center, or the workspace command that
   preselects the current project) creates a workspace in a new worktree or the project directory,
   with a [container profile](#container-profiles-and-engines), and opens it at once. Its sandbox

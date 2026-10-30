@@ -8,7 +8,14 @@
       "description": "在容器、microVM 或 Bubblewrap 沙箱中运行工作区的 Agent 和终端，沙箱只能访问你选择的文件夹。"
     }
   },
-  "media": [],
+  "media": [
+    "assets/screenshot-terminal-light.png",
+    "assets/screenshot-terminal-dark.png",
+    "assets/screenshot-panel-light.png",
+    "assets/screenshot-panel-dark.png",
+    "assets/screenshot-form-light.png",
+    "assets/screenshot-form-dark.png"
+  ],
   "requirements": {
     "paseo": ">=0.13.0"
   }
