@@ -1,4 +1,4 @@
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi } from "./paseo";
 import type { SandboxStore } from "./store";
 
 const SANDBOX_SUFFIX = "-sandbox";

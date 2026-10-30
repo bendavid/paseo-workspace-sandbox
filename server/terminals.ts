@@ -1,4 +1,4 @@
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi } from "./paseo";
 import type { SandboxTerminalProfile } from "../shared/rpc";
 
 interface TerminalProfile {

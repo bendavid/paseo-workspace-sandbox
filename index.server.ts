@@ -1,4 +1,4 @@
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi } from "./server/paseo";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { ClaudeLoginKeeper, hostClaudeFromConfig } from "./server/claude-login";
 import { ContainerProfiles } from "./server/container-profiles";

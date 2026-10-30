@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi } from "./paseo";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import type { ClaudeLoginKeeper } from "./claude-login";
 import { CONTAINED_ACP_CAPABILITIES, type ProfileManager } from "./profiles";

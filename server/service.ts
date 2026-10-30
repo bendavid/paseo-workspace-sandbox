@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi } from "./paseo";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { ClaudeLoginKeeper } from "./claude-login";
 import { prepareClaudeHome } from "./claude-home";
