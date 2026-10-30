@@ -14,7 +14,9 @@ You need one of these on the daemon's machine:
 - **microsandbox** (`msb`): one microVM per workspace.
 - **Bubblewrap** (`bwrap`): a fresh sandbox per launch with your system's `/usr` and `/etc` read-only, so it uses the tools installed on the host. It needs unprivileged user namespaces.
 
-Container profiles, in the form and in Settings > Sandbox, hold the engine, image, network (host, separate or none), extra folders to mount (read-write or read-only) and extra engine arguments. The first profile uses Podman, or Docker when only Docker is installed, with the `node:22-bookworm-slim` image. That image has no agent CLIs: use an image that installs them, or mount them from the host. Creating a sandbox pulls its profile's image from the registry you name the first time.
+Container profiles, in the form and in Settings > Sandbox, hold the engine, image, network (host, separate or none), extra folders to mount (read-write or read-only) and extra engine arguments. The first profile uses Podman, or Docker when only Docker is installed, with the `docker.io/library/node:22-bookworm-slim` image. Images are full references that name their registry. That image has no agent CLIs: use an image that installs them, or mount them from the host.
+
+The plugin never downloads an image on its own. When the selected profile's image is not on the machine, Create asks first, naming the full image reference, and Cancel creates and downloads nothing. If a sandbox later needs an image that is gone, its start fails and the Sandbox panel offers to download that image. Resuming an existing sandbox, such as after a reboot, downloads nothing.
 
 The plugin needs Paseo 0.13.0 or later. It has been tested on Linux.
 

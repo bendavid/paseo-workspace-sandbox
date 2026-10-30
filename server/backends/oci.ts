@@ -28,6 +28,8 @@ async function containerOptions(
     `${mount.source ?? mount.path}:${mount.path}${mount.readOnly ? ":ro" : ""}`,
   ]);
   return [
+    // Images download only through `pull`, after the user agreed; see ImageStore.
+    "--pull=never",
     "--network",
     policy.network,
     ...identity,
@@ -57,6 +59,18 @@ async function inspect(cli: string, name: string): Promise<ContainerStatus> {
 /** Podman and Docker: one long-lived container per workspace, joined with `exec`. */
 export const ociBackend: SandboxBackend = {
   persistent: true,
+
+  images: {
+    async exists(cli, image) {
+      return runCli(cli, ["image", "inspect", "--format", "{{.Id}}", image]).then(
+        () => true,
+        () => false,
+      );
+    },
+    async pull(cli, image) {
+      await runCli(cli, ["pull", image], { long: true });
+    },
+  },
 
   async start(target, policy) {
     const current = await inspect(policy.cli, target.container);

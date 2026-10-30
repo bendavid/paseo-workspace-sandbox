@@ -6,7 +6,7 @@ import {
   type PluginScreenProps,
 } from "@getpaseo/plugin/client";
 import type { PluginTheme } from "@getpaseo/plugin";
-import { Icon, Loading, TextInput } from "@getpaseo/plugin/client/ui";
+import { Icon, Loading, Modal, TextInput } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
   ActivityIndicator,
@@ -20,6 +20,7 @@ import {
 import {
   createSandboxedWorkspaceRpc,
   describeProfile,
+  imageStatusRpc,
   listContainerProfilesRpc,
   listRefsRpc,
   type ContainerProfile,
@@ -93,6 +94,7 @@ function useSandboxLists() {
 function useSandboxForm(params: PluginScreenParams, openWorkspace: (workspaceId: string) => void) {
   const listRefs = useRpc(listRefsRpc);
   const createWorkspace = useRpc(createSandboxedWorkspaceRpc);
+  const getImageStatus = useRpc(imageStatusRpc);
   const lists = useSandboxLists();
   const [projectId, setProjectId] = useState(params.projectId ?? "");
   const [profileId, setProfileId] = useState<string | null>(null);
@@ -121,23 +123,47 @@ function useSandboxForm(params: PluginScreenParams, openWorkspace: (workspaceId:
     mutationFn: createWorkspace,
     onSuccess: ({ workspaceId }) => openWorkspace(workspaceId),
   });
+  // A missing image downloads only after the user agrees to that exact reference.
+  const imageCheck = useMutation({ mutationFn: getImageStatus });
+  const [download, setDownload] = useState<string | null>(null);
+  const request = useCallback(
+    () =>
+      project
+        ? buildCreateInput({
+            projectId: project.projectId,
+            profileId: profile?.id ?? null,
+            isolation,
+            baseRef,
+            title,
+          })
+        : null,
+    [baseRef, isolation, profile, project, title],
+  );
   const submit = useCallback(() => {
-    if (!project || create.isPending) return;
-    create.mutate(
-      buildCreateInput({
-        projectId: project.projectId,
-        profileId: profile?.id ?? null,
-        isolation,
-        baseRef,
-        title,
-      }),
-    );
-  }, [baseRef, create, isolation, profile, project, title]);
+    const input = request();
+    if (!input || create.isPending || imageCheck.isPending) return;
+    imageCheck.mutate(profile ? { profileId: profile.id } : {}, {
+      onSuccess: ({ image, present }) => {
+        if (image && !present) setDownload(image);
+        else create.mutate(input);
+      },
+    });
+  }, [create, imageCheck, profile, request]);
+  const confirmDownload = useCallback(() => {
+    const input = request();
+    if (!input || !download) return;
+    setDownload(null);
+    create.mutate({ ...input, downloadImage: download });
+  }, [create, download, request]);
+  const cancelDownload = useCallback(() => setDownload(null), []);
 
   return {
     lists,
-    error: create.error ?? lists.error ?? refs.error,
-    pending: create.isPending,
+    error: create.error ?? imageCheck.error ?? lists.error ?? refs.error,
+    pending: create.isPending || imageCheck.isPending,
+    download,
+    confirmDownload,
+    cancelDownload,
     refs: refs.data ?? { current: null, refs: [] },
     project,
     isGit,
@@ -277,6 +303,89 @@ function SendButton({ theme, form }: { theme: PluginTheme; form: SandboxForm }) 
         <Icon name="CornerDownLeft" size={ICON.md} color={theme.colors.accentForeground} />
       ) : null}
     </Pressable>
+  );
+}
+
+/** Asks before creating a workspace whose image is not on this machine yet. */
+function DownloadConfirmation({ theme, form }: { theme: PluginTheme; form: SandboxForm }) {
+  const { cancelDownload } = form;
+  const openChange = useCallback(
+    (open: boolean) => {
+      if (!open) cancelDownload();
+    },
+    [cancelDownload],
+  );
+  const styles = useMemo(() => {
+    const button = {
+      minHeight: 32,
+      paddingHorizontal: 14,
+      paddingVertical: 6,
+      borderRadius: 16,
+      alignItems: "center" as const,
+      justifyContent: "center" as const,
+    };
+    return {
+      text: { fontSize: FONT.base, color: theme.colors.foreground },
+      muted: { fontSize: FONT.base, color: theme.colors.foregroundMuted },
+      image: {
+        fontSize: FONT.base,
+        fontFamily: "monospace",
+        color: theme.colors.foreground,
+        backgroundColor: theme.colors.surface1,
+        borderColor: theme.colors.border,
+        borderWidth: 1,
+        borderRadius: 6,
+        paddingHorizontal: 10,
+        paddingVertical: 6,
+      },
+      row: {
+        flexDirection: "row" as const,
+        flexWrap: "wrap" as const,
+        justifyContent: "flex-end" as const,
+        gap: 8,
+      },
+      cancel: { ...button, borderWidth: 1, borderColor: theme.colors.border },
+      cancelLabel: { fontSize: FONT.base, color: theme.colors.foreground },
+      confirm: { ...button, flexShrink: 1, backgroundColor: theme.colors.accent },
+      confirmLabel: {
+        fontSize: FONT.base,
+        fontWeight: "500" as const,
+        color: theme.colors.accentForeground,
+      },
+    };
+  }, [theme]);
+  const image = form.download;
+  return (
+    <Modal title="Download image?" open={image !== null} onOpenChange={openChange}>
+      <Modal.Content>
+        <Text style={styles.text}>
+          The container profile’s image is not on this machine. Creating the workspace downloads it
+          from its registry:
+        </Text>
+        <Text style={styles.image} selectable>
+          {image}
+        </Text>
+        <Text style={styles.muted}>Cancel creates nothing and downloads nothing.</Text>
+        <View style={styles.row}>
+          <Pressable
+            accessibilityRole="button"
+            onPress={cancelDownload}
+            style={styles.cancel}
+            testID="sandbox-download-cancel"
+          >
+            <Text style={styles.cancelLabel}>Cancel</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            onPress={form.confirmDownload}
+            style={styles.confirm}
+            testID="sandbox-download-confirm"
+          >
+            <Text style={styles.confirmLabel}>Create workspace and download {image}</Text>
+          </Pressable>
+        </View>
+      </Modal.Content>
+    </Modal>
   );
 }
 
@@ -650,6 +759,7 @@ export function NewSandboxedWorkspaceScreen({
         editProfiles={editing.open}
       />
       <ProfileEditor target={editing.target} onClose={editing.close} onSaved={editing.saved} />
+      <DownloadConfirmation theme={theme} form={form} />
     </View>
   );
 }

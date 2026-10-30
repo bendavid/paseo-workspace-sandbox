@@ -31,6 +31,21 @@ export function engineUsesImage(engine: Engine): boolean {
 /** The image new profiles start with: Node.js for the npm-installed agent CLIs, on Debian. */
 export const DEFAULT_IMAGE = "docker.io/library/node:22-bookworm-slim";
 
+/**
+ * Whether an image names its registry, such as `docker.io/library/node:22` or `localhost/tools`.
+ * The download confirmation shows exactly what will be fetched, and engines resolve short names
+ * differently.
+ */
+export function isFullImageReference(image: string): boolean {
+  const slash = image.indexOf("/");
+  if (slash <= 0 || /\s/.test(image)) return false;
+  const registry = image.slice(0, slash);
+  return registry === "localhost" || registry.includes(".") || registry.includes(":");
+}
+
+export const IMAGE_REFERENCE_HINT =
+  "Use the full image reference, with its registry, such as docker.io/library/node:22";
+
 /** A saved sandbox configuration. Each workspace keeps a copy of the one it was created with. */
 export const ContainerProfileSchema = z.object({
   id: z.string().min(1),
@@ -89,11 +104,17 @@ export const ClaudeLoginSchema = z.discriminatedUnion("state", [
 export type ClaudeLogin = z.infer<typeof ClaudeLoginSchema>;
 
 export const ContainerStatusSchema = z.discriminatedUnion("state", [
-  z.object({ state: z.literal("starting") }),
+  /** `downloading` names the image being pulled. */
+  z.object({ state: z.literal("starting"), downloading: z.string().optional() }),
   z.object({ state: z.literal("running") }),
   z.object({ state: z.literal("stopped") }),
   z.object({ state: z.literal("missing") }),
-  z.object({ state: z.literal("failed"), error: z.string() }),
+  /** `missingImage`: the image is not on this machine and needs the user's go-ahead to download. */
+  z.object({
+    state: z.literal("failed"),
+    error: z.string(),
+    missingImage: z.string().optional(),
+  }),
 ]);
 
 export type ContainerStatus = z.infer<typeof ContainerStatusSchema>;
@@ -113,6 +134,11 @@ export const createSandboxedWorkspaceRpc = defineRpc({
     /** Starting ref for a Git project's worktree; the project's current branch when omitted. */
     baseRef: z.string().trim().min(1).optional(),
     title: z.string().trim().min(1).optional(),
+    /**
+     * The profile's image, when the user agreed to download it if it is missing. Without it,
+     * nothing is downloaded and a missing image fails the sandbox's start.
+     */
+    downloadImage: z.string().min(1).optional(),
   }),
   /** Returns as soon as the workspace exists; the sandbox is ready when its status says so. */
   output: z.object({ workspaceId: z.string() }),
@@ -208,4 +234,19 @@ export const openSandboxShellRpc = defineRpc({
     profileId: z.string().optional(),
   }),
   output: z.object({ terminalId: z.string() }),
+});
+
+/** Whether a profile's image is on this machine, so the form can ask before downloading it. */
+export const imageStatusRpc = defineRpc({
+  name: "sandbox.image.status",
+  input: z.object({ profileId: z.string().min(1).optional() }),
+  /** `image` is null for engines that run the host's system. */
+  output: z.object({ image: z.string().nullable(), present: z.boolean() }),
+});
+
+/** Downloads a workspace's image, which the user named, and starts its sandbox. */
+export const downloadImageRpc = defineRpc({
+  name: "sandbox.image.download",
+  input: z.object({ workspaceId: z.string(), image: z.string().min(1) }),
+  output: z.object({}),
 });

@@ -11,8 +11,10 @@ import {
 import { useCallback, useState } from "react";
 import {
   DEFAULT_IMAGE,
+  IMAGE_REFERENCE_HINT,
   deleteContainerProfileRpc,
   engineUsesImage,
+  isFullImageReference,
   saveContainerProfileRpc,
   type ContainerProfile,
   type Engine,
@@ -194,7 +196,7 @@ function EditorForm({
         {needsImage ? (
           <SettingsInput
             label="Image"
-            hint="Must provide the agent CLIs, or mount them below"
+            hint={`${IMAGE_REFERENCE_HINT}. It must provide the agent CLIs, or mount them below`}
             initialValue={draft.image}
             onChangeText={field("image")}
             disabled={busy}
@@ -235,7 +237,9 @@ function EditorForm({
           label={editing ? "Existing workspaces keep their copy" : "Saved for new workspaces"}
           actionLabel={saving.isPending ? "Saving…" : "Save"}
           onPress={submit}
-          disabled={busy || !draft.name.trim() || (needsImage && !draft.image.trim())}
+          disabled={
+            busy || !draft.name.trim() || (needsImage && !isFullImageReference(draft.image.trim()))
+          }
           error={error}
         />
         {editing && target.canDelete ? (

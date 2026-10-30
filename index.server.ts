@@ -11,6 +11,8 @@ import { writeWrapper } from "./server/wrapper";
 import {
   createSandboxedWorkspaceRpc,
   deleteContainerProfileRpc,
+  downloadImageRpc,
+  imageStatusRpc,
   listContainerProfilesRpc,
   listRefsRpc,
   listSandboxesRpc,
@@ -82,6 +84,13 @@ export default function contribute(server: PluginServerContext) {
   server.handle(sandboxStatusRpc, async ({ workspaceId }, { paseo }) =>
     (await resolve(paseo)).status(workspaceId),
   );
+  server.handle(imageStatusRpc, async ({ profileId }, { paseo }) =>
+    (await resolve(paseo)).imageStatus(profileId),
+  );
+  server.handle(downloadImageRpc, async ({ workspaceId, image }, { paseo }) => {
+    await (await resolve(paseo)).downloadImage(workspaceId, image);
+    return {};
+  });
   server.handle(openSandboxShellRpc, async (input, { paseo }) =>
     (await resolve(paseo)).openShell(input, paseo),
   );

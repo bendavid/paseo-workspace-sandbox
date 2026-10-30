@@ -9,6 +9,7 @@ import {
   resolveEngineCli,
   type ClaudeFolderAccess,
 } from "./backends/index";
+import type { ImageStore } from "./backends/types";
 import {
   containerName,
   shellQuote,
@@ -22,12 +23,15 @@ import { listRefs } from "./git";
 import { resolveTerminalLaunch } from "./terminals";
 import { writeFileAtomic, type SandboxStore } from "./store";
 import {
+  IMAGE_REFERENCE_HINT,
   engineUsesImage,
+  isFullImageReference,
   type ContainerProfile,
   type ContainerStatus,
   type SandboxHealth,
   type SandboxRecord,
   type createSandboxedWorkspaceRpc,
+  type imageStatusRpc,
   type listRefsRpc,
   type listSandboxesRpc,
   type openSandboxShellRpc,
@@ -96,6 +100,19 @@ function buildWorkspaceRequest(
   return { source, ...(title ? { title } : {}) };
 }
 
+/** The sandbox needs an image that is not on this machine, and nobody agreed to download it. */
+class ImageMissingError extends Error {
+  constructor(readonly image: string) {
+    super(`The image ${image} is not on this machine. Download it from the Sandbox panel.`);
+    this.name = "ImageMissingError";
+  }
+}
+
+interface StartFailure {
+  message: string;
+  missingImage?: string;
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -103,7 +120,15 @@ function describeError(error: unknown): string {
 export class SandboxService {
   // In-flight ensureRunning attempts by workspace ID; each resolves to null or why it failed.
   private readonly starting = new Map<string, Promise<string | null>>();
-  private readonly failures = new Map<string, string>();
+  private readonly failures = new Map<string, StartFailure>();
+  /**
+   * The image the user agreed to download, by workspace ID: from the form at creation, or the
+   * panel's Download button. It covers the next start attempt only and is never stored, so retries,
+   * restarts, and recreated containers download nothing.
+   */
+  private readonly approvedDownloads = new Map<string, string>();
+  /** Workspaces whose image is downloading. */
+  private readonly downloading = new Set<string>();
   /** Workspaces this process is creating; their pending records are not leftovers. */
   private readonly creating = new Set<string>();
 
@@ -171,11 +196,37 @@ export class SandboxService {
   /** Decides the Claude folder if that is still open, then starts or recreates the container. */
   private async runContainer(record: SandboxRecord): Promise<void> {
     const policy = await this.policy(record.profile);
+    const backend = backendFor(policy.engine);
+    // Only the Claude folder check and creating the sandbox run the image; resuming an existing
+    // container or microVM needs nothing new.
+    const runsImage =
+      record.claudeHome === "checking" ||
+      (await backend.status(workspaceTarget(record, { mode: "none" }), policy)).state === "missing";
+    if (backend.images && runsImage) await this.ensureImage(record, policy, backend.images);
     const decided =
       record.claudeHome === "checking" ? await this.decideClaudeHome(record, policy) : record;
     const target = await this.prepareTarget(decided);
     await this.writeSpec(decided, target, policy);
-    await backendFor(policy.engine).start(target, policy);
+    await backend.start(target, policy);
+  }
+
+  /** Downloads the image only when it is missing and the user agreed to download exactly it. */
+  private async ensureImage(
+    record: SandboxRecord,
+    policy: ContainerPolicy,
+    images: ImageStore,
+  ): Promise<void> {
+    const { image } = record.profile;
+    if (await images.exists(policy.cli, image)) return;
+    if (this.approvedDownloads.get(record.workspaceId) !== image) {
+      throw new ImageMissingError(image);
+    }
+    this.downloading.add(record.workspaceId);
+    try {
+      await images.pull(policy.cli, image);
+    } finally {
+      this.downloading.delete(record.workspaceId);
+    }
   }
 
   /**
@@ -228,12 +279,18 @@ export class SandboxService {
       .then(() => null)
       .catch((error: unknown) => {
         const message = describeError(error);
-        this.failures.set(workspaceId, message);
+        this.failures.set(workspaceId, {
+          message,
+          ...(error instanceof ImageMissingError ? { missingImage: error.image } : {}),
+        });
         const detail = error instanceof Error && error.cause ? error.cause : error;
         console.error(`Sandbox ${record.container} failed to start`, describeError(detail));
         return message;
       })
-      .finally(() => this.starting.delete(workspaceId));
+      .finally(() => {
+        this.starting.delete(workspaceId);
+        this.approvedDownloads.delete(workspaceId);
+      });
     this.starting.set(workspaceId, task);
     return task;
   }
@@ -252,7 +309,9 @@ export class SandboxService {
       const outcome = await Promise.race([this.ensureRunning(workspaceId), timeout]);
       if (outcome === "timeout") {
         throw new Error(
-          "The sandbox is still starting; its first start pulls the image. Try again in a moment.",
+          this.downloading.has(workspaceId)
+            ? "The sandbox is still downloading its image. Try again in a moment."
+            : "The sandbox is still starting. Try again in a moment.",
         );
       }
       if (outcome !== null) throw new Error(`The sandbox did not start: ${outcome}`);
@@ -284,9 +343,12 @@ export class SandboxService {
       throw new Error("A sandboxed worktree needs a Git project");
     }
     const policy = await this.policy(profile);
-    if (engineUsesImage(policy.engine) && !profile.image) {
+    if (engineUsesImage(policy.engine) && !isFullImageReference(profile.image)) {
+      throw new Error(`${IMAGE_REFERENCE_HINT}, in the container profile "${profile.name}"`);
+    }
+    if (input.downloadImage !== undefined && input.downloadImage !== profile.image) {
       throw new Error(
-        `The container profile "${profile.name}" needs an image for ${policy.engine}`,
+        `The image to download, ${input.downloadImage}, is not the profile's (${profile.image})`,
       );
     }
     return { profile, project, isolation, policy };
@@ -336,9 +398,33 @@ export class SandboxService {
   ): Promise<RpcOutput<typeof createSandboxedWorkspaceRpc>> {
     const plan = await this.planCreation(input, paseo);
     const record = await this.createRegistered(input, plan, paseo);
+    if (input.downloadImage) this.approvedDownloads.set(record.workspaceId, input.downloadImage);
     // The workspace opens at once; agents and terminals wait for the sandbox when they launch.
     void this.ensureRunning(record.workspaceId);
     return { workspaceId: record.workspaceId };
+  }
+
+  /** A profile's image and whether it is on this machine; null for engines without images. */
+  async imageStatus(profileId: string | undefined): Promise<RpcOutput<typeof imageStatusRpc>> {
+    const profile = this.containerProfiles.get(profileId);
+    const { images } = backendFor(profile.engine);
+    if (!images) return { image: null, present: true };
+    const policy = await this.policy(profile);
+    return { image: profile.image, present: await images.exists(policy.cli, profile.image) };
+  }
+
+  /** Downloads a workspace's image, which the user named, and starts its sandbox. */
+  async downloadImage(workspaceId: string, image: string): Promise<void> {
+    const record = this.store.get(workspaceId);
+    if (!record) throw new Error("This workspace is not sandboxed");
+    if (image !== record.profile.image) {
+      throw new Error(`The image to download, ${image}, is not the sandbox's`);
+    }
+    // Let a running attempt finish, so the approval belongs to a fresh one.
+    await this.starting.get(workspaceId);
+    this.approvedDownloads.set(workspaceId, image);
+    // A download outlasts an RPC; the status reports its progress.
+    void this.ensureRunning(workspaceId);
   }
 
   /** Every sandbox with its health, from what this process knows: no container is inspected. */
@@ -355,7 +441,9 @@ export class SandboxService {
     const { workspaceId } = sandbox;
     if (sandbox.pending || this.starting.has(workspaceId)) return { state: "starting" };
     const failure = this.failures.get(workspaceId);
-    if (failure) return { state: "failed", error: `The container did not start: ${failure}` };
+    if (failure) {
+      return { state: "failed", error: `The container did not start: ${failure.message}` };
+    }
     return { state: "ready" };
   }
 
@@ -373,7 +461,10 @@ export class SandboxService {
     const claude = this.claudeHome(sandbox);
     const container: ContainerStatus =
       sandbox.pending || this.starting.has(workspaceId)
-        ? { state: "starting" }
+        ? {
+            state: "starting",
+            ...(this.downloading.has(workspaceId) ? { downloading: sandbox.profile.image } : {}),
+          }
         : await this.inspectAfterFailure(sandbox);
     return {
       sandbox,
@@ -392,7 +483,13 @@ export class SandboxService {
     );
     const failure = this.failures.get(sandbox.workspaceId);
     if (!failure) return inspected;
-    if (inspected.state !== "running") return { state: "failed", error: failure };
+    if (inspected.state !== "running") {
+      return {
+        state: "failed",
+        error: failure.message,
+        ...(failure.missingImage ? { missingImage: failure.missingImage } : {}),
+      };
+    }
     this.failures.delete(sandbox.workspaceId);
     return inspected;
   }

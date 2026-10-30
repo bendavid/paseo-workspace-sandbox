@@ -5,7 +5,9 @@ import { z } from "zod";
 import {
   ContainerProfileSchema,
   DEFAULT_IMAGE,
+  IMAGE_REFERENCE_HINT,
   engineUsesImage,
+  isFullImageReference,
   type ContainerProfile,
 } from "../shared/rpc";
 import { which } from "./container";
@@ -79,8 +81,8 @@ export class ContainerProfiles {
     input: Omit<ContainerProfile, "id"> & { id?: string },
     makeDefault: boolean,
   ): Promise<ContainerProfile> {
-    if (engineUsesImage(input.engine) && !input.image) {
-      throw new Error(`${input.engine} needs an image`);
+    if (engineUsesImage(input.engine) && !isFullImageReference(input.image)) {
+      throw new Error(input.image ? IMAGE_REFERENCE_HINT : `${input.engine} needs an image`);
     }
     const profile: ContainerProfile = {
       ...input,

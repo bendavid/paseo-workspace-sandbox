@@ -103,8 +103,22 @@ read-only if either is. The host network lets agents reach the daemon's MCP endp
 
 ### Image
 
-Engines other than Bubblewrap run an image. The first profile's image, `node:22-bookworm-slim`, has
-no agent CLIs. Build one that installs them, or mount them from the host under extra mounts:
+Engines other than Bubblewrap run an image, given as a full reference that names its registry
+(`docker.io/library/node:22`, `localhost/agents`): engines resolve short names differently, and
+the download confirmation shows exactly what is fetched.
+
+Nothing downloads an image without your go-ahead. Every run and create passes `--pull never`, and
+the plugin pulls only after you agree to that exact reference:
+
+- When the selected profile's image is missing, Create asks first: **Create workspace and download
+  `<image>`**, or Cancel, which creates and downloads nothing.
+- When a sandbox needs an image that is not there, such as after the image was removed, its start
+  fails without downloading, and the Sandbox panel offers **Download `<image>`**. Retries, daemon
+  restarts, and agent launches never download.
+- Resuming an existing container or microVM needs no image download. Only the Claude folder check
+  and creating the sandbox run the image.
+
+The first profile's image, `docker.io/library/node:22-bookworm-slim`, has no agent CLIs. Build one that installs them, or mount them from the host under extra mounts:
 
 ```dockerfile
 FROM docker.io/library/node:22-bookworm-slim
@@ -222,8 +236,9 @@ one. One start per workspace runs at a time, and everything that needs the sandb
 - The `agent.session_open` hook waits up to 25 of its 30 seconds before every agent launch: the
   daemon needs the session's `CLAUDE_CONFIG_DIR` before the session starts.
 - Opening a sandboxed terminal waits up to 45 seconds of the RPC's 60.
-- Starting a stopped container, such as after a reboot, takes a second or two. Only an image's
-  first pull runs longer; launches are refused with "still starting" while it goes on.
+- Starting a stopped container, such as after a reboot, takes a second or two. Only an image
+  download you agreed to runs longer; launches are refused with "still downloading" while it goes
+  on.
 
 A failed start turns the header button into **Sandbox failed**, with the engine's last error line as
 its tooltip, and the Sandbox panel shows the error. Agent launches and sandboxed terminals fail with

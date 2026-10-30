@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRpc, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import {
   Loading,
@@ -12,6 +12,7 @@ import { useCallback, useMemo } from "react";
 import { Text } from "react-native";
 import {
   describeProfile,
+  downloadImageRpc,
   openSandboxShellRpc,
   sandboxStatusRpc,
   type ClaudeLogin,
@@ -21,7 +22,7 @@ import {
 function describe(container: ContainerStatus): string {
   switch (container.state) {
     case "starting":
-      return "Starting (pulling the image on first use)";
+      return container.downloading ? `Downloading ${container.downloading}` : "Starting";
     case "running":
       return "Running";
     case "stopped":
@@ -70,6 +71,12 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
   });
   const shell = useMutation({ mutationFn: openShell });
   const open = useCallback(() => shell.mutate({ workspaceId }), [shell, workspaceId]);
+  const queryClient = useQueryClient();
+  const requestDownload = useRpc(downloadImageRpc);
+  const download = useMutation({
+    mutationFn: requestDownload,
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["status", workspaceId] }),
+  });
   const styles = useMemo(
     () => ({
       content: { padding: layout.compact ? 16 : 24, gap: 16 },
@@ -107,7 +114,19 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
           {error}
         </Text>
       ))}
-      {container.state === "failed" ? (
+      {container.state === "failed" && container.missingImage ? (
+        <SettingsCard>
+          <SettingsAction
+            label="Download the image"
+            hint={`From its registry: ${container.missingImage}`}
+            actionLabel={`Download ${container.missingImage}`}
+            onPress={() => download.mutate({ workspaceId, image: container.missingImage ?? "" })}
+            disabled={download.isPending}
+            error={download.error?.message ?? null}
+          />
+        </SettingsCard>
+      ) : null}
+      {container.state === "failed" && !container.missingImage ? (
         <Text style={styles.detail}>
           Starting an agent or opening a sandboxed terminal tries again. The daemon log has the full
           output.

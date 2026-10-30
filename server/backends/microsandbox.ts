@@ -27,6 +27,9 @@ async function sandboxOptions(target: ContainerTarget, policy: ContainerPolicy):
     ...baseEnvironment(target).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
     ...mounts,
     ...network(policy),
+    // Images download only through `pull`, after the user agreed; see ImageStore.
+    "--pull",
+    "never",
     ...extraArguments(policy),
   ];
 }
@@ -61,6 +64,18 @@ async function inspect(cli: string, name: string): Promise<ContainerStatus> {
  */
 export const microsandboxBackend: SandboxBackend = {
   persistent: true,
+
+  images: {
+    async exists(cli, image) {
+      return runCli(cli, ["image", "inspect", image]).then(
+        () => true,
+        () => false,
+      );
+    },
+    async pull(cli, image) {
+      await runCli(cli, ["pull", "--quiet", image], { long: true });
+    },
+  },
 
   async start(target, policy) {
     const current = await inspect(policy.cli, target.container);
