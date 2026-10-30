@@ -91,3 +91,23 @@ test("refuses a network the engine does not have", async () => {
   );
   expect(store.get(none.id).network).toBe("none");
 });
+
+test("rejects extra run arguments with an unclosed quote", async () => {
+  const store = new ContainerProfiles(await directory());
+  await store.load();
+  const profile = {
+    name: "Ping",
+    engine: "podman",
+    image: DEFAULT_IMAGE,
+    network: "bridge",
+    extraMounts: "",
+  } as const;
+  await expect(
+    store.save({ ...profile, extraRunArgs: '--sysctl "net.ipv4.ping_group_range=0 0' }, false),
+  ).rejects.toThrow(/unclosed "/);
+  const saved = await store.save(
+    { ...profile, extraRunArgs: '--sysctl "net.ipv4.ping_group_range=0 0"' },
+    false,
+  );
+  expect(store.get(saved.id).extraRunArgs).toBe('--sysctl "net.ipv4.ping_group_range=0 0"');
+});

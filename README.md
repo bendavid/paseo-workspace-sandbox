@@ -75,7 +75,9 @@ services such as a model server on `localhost` aren't reachable.
 
 The profile's **Command** is the engine's executable; empty means the default (`podman`, `docker`,
 `bwrap`, `msb`, `apptainer`, `singularity`) on `PATH`, or `~/.microsandbox/bin/msb`. Container runtimes such as krun, gVisor,
-or Kata go in **Extra run arguments** (`--runtime krun`).
+or Kata go in **Extra run arguments** (`--runtime krun`). Extra run arguments are split into words
+like a shell command, without expanding variables or `~`: quote or backslash-escape a value with
+spaces, as in `--sysctl "net.ipv4.ping_group_range=1000 1000"`.
 
 - **Podman and Docker** keep a long-lived container that launches join with `exec`. Run as host
   user, Podman uses `--userns=keep-id` and Docker `--user <uid>:<gid>`; see

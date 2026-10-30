@@ -80,6 +80,43 @@ export function isFullImageReference(image: string): boolean {
   return registry === "localhost" || registry.includes(".") || registry.includes(":");
 }
 
+/**
+ * Splits extra run arguments into words as a POSIX shell would, without expanding anything:
+ * whitespace separates words, single quotes keep everything, double quotes keep everything but
+ * backslash before `"`, `\`, `$`, and backtick, and an unquoted backslash keeps the next character.
+ * Throws on an unclosed quote or a trailing backslash.
+ */
+export function splitArguments(value: string): string[] {
+  const words: string[] = [];
+  let word: string | null = null;
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index]!;
+    if (/\s/.test(char)) {
+      if (word !== null) words.push(word);
+      word = null;
+    } else if (char === "'") {
+      const end = value.indexOf("'", index + 1);
+      if (end === -1) throw new Error("Extra run arguments have an unclosed '");
+      word = (word ?? "") + value.slice(index + 1, end);
+      index = end;
+    } else if (char === '"') {
+      word ??= "";
+      for (index++; value[index] !== '"'; index++) {
+        if (index >= value.length) throw new Error('Extra run arguments have an unclosed "');
+        if (value[index] === "\\" && /["\\$`]/.test(value[index + 1] ?? "")) index++;
+        word += value[index];
+      }
+    } else if (char === "\\") {
+      if (index + 1 >= value.length) throw new Error("Extra run arguments end in a backslash");
+      word = (word ?? "") + value[++index];
+    } else {
+      word = (word ?? "") + char;
+    }
+  }
+  if (word !== null) words.push(word);
+  return words;
+}
+
 export const IMAGE_REFERENCE_HINT =
   "Use the full image reference, with its registry, such as docker.io/library/node:22";
 

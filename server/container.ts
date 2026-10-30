@@ -3,7 +3,7 @@ import { lstat, mkdir, rm, symlink } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
 import { execCommand } from "@getpaseo/plugin/server";
-import type { Engine, SandboxRecord } from "../shared/rpc";
+import { type Engine, type SandboxRecord, splitArguments } from "../shared/rpc";
 
 /** An engine, its command, and the parts of a sandbox's profile every engine reads. */
 export interface ContainerPolicy {
@@ -343,9 +343,9 @@ export function baseEnvironment(
   ];
 }
 
-/** Extra run arguments split on whitespace, as each engine receives them. */
+/** Extra run arguments split into words with shell quoting, as each engine receives them. */
 export function extraArguments(policy: ContainerPolicy): string[] {
-  return policy.extraRunArgs.split(/\s+/).filter(Boolean);
+  return splitArguments(policy.extraRunArgs);
 }
 
 /**

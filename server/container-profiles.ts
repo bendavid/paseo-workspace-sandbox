@@ -10,6 +10,7 @@ import {
   engineUsesImage,
   imageHint,
   isValidImage,
+  splitArguments,
   type ContainerProfile,
 } from "../shared/rpc";
 import { which } from "./container";
@@ -89,6 +90,8 @@ export class ContainerProfiles {
     if (!ENGINE_NETWORKS[input.engine].includes(input.network)) {
       throw new Error(`${input.engine} has no ${input.network} network`);
     }
+    // Throws on unbalanced quotes, which would otherwise fail only when a sandbox starts.
+    splitArguments(input.extraRunArgs);
     const profile: ContainerProfile = {
       ...input,
       id: input.id ?? `profile-${randomUUID().slice(0, 8)}`,

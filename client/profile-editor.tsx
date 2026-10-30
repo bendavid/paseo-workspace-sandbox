@@ -280,7 +280,7 @@ function EditorForm({
         />
         <SettingsInput
           label="Extra run arguments"
-          hint={`Added to ${RUN_COMMANDS[engine]}`}
+          hint={`Added to ${RUN_COMMANDS[engine]}; quote values with spaces`}
           initialValue={draft.extraRunArgs}
           onChangeText={field("extraRunArgs")}
           disabled={busy}
