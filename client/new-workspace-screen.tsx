@@ -739,9 +739,10 @@ export function NewSandboxedWorkspaceScreen({
       <PromptComposer theme={theme} compact={compact} form={form} />
       {form.project && form.isolation === "directory" ? (
         <Text style={styles.note}>
-          {form.isGit ? "" : "Not a Git repository: "}The sandbox uses the project directory, which
-          the project’s other workspaces share, so new agents started anywhere in it run in this
-          sandbox.
+          {form.isGit ? "" : "Not a Git repository: "}The sandbox works in the project directory
+          itself, which the project’s other workspaces share
+          {form.isGit ? ", including its .git" : ""}. Their agents don’t run in this sandbox. This
+          workspace shows its own link to the directory as its path.
         </Text>
       ) : null}
       {form.error ? <Text style={styles.error}>{form.error.message}</Text> : null}
