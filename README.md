@@ -87,8 +87,17 @@ Each sandbox mounts, at the same absolute paths:
 | Workspace directory                         | read-write | The agent's work                                      |
 | Source checkout `.git`                      | read-write | A worktree's objects and refs live there              |
 | `.git/hooks`, `.git/config`                 | read-only  | Both run on the host whenever git runs there          |
+| `.git/worktrees`                            | read-only  | Other worktrees look missing inside; see below        |
+| `.git/worktrees/<this worktree>`            | read-write | The worktree's own HEAD, index, and logs              |
 | The workspace's own Claude folder           | read-write | See [Claude Code sign-in](#claude-code-sign-in)       |
 | `~/.codex`, `~/.copilot`, `~/.pi`, `~/.omp` | read-write | Credentials, and history the daemon reads on the host |
+
+The `.git` rows apply to sandboxed worktrees. The repository's other worktrees are not mounted, so
+git in the sandbox sees them as missing, and `git worktree prune` there would remove them on the
+host too. Their entries stay read-only, so pruning them fails, as does `git worktree add`, and
+`git worktree repair` can only change this worktree's own entry; committing and switching branches
+work. A sandboxed directory shares the project directory by
+design and has no `.git` handling.
 
 `HOME` keeps the host path, but nothing else of the home directory is mounted. A container engine
 creates it owned by root as the parent of the provider directories, so it is not writable: tools

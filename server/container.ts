@@ -151,7 +151,8 @@ export async function runCli(
   }
 }
 
-async function gitCommonDirectory(cwd: string): Promise<string | null> {
+/** The repository's shared git directory and this checkout's own, or null outside git. */
+async function gitDirectories(cwd: string): Promise<{ common: string; own: string } | null> {
   try {
     const { stdout } = await execCommand("git", [
       "-C",
@@ -159,8 +160,10 @@ async function gitCommonDirectory(cwd: string): Promise<string | null> {
       "rev-parse",
       "--path-format=absolute",
       "--git-common-dir",
+      "--git-dir",
     ]);
-    return stdout.trim() || null;
+    const [common, own] = stdout.trim().split("\n");
+    return common && own ? { common, own } : null;
   } catch {
     return null;
   }
@@ -202,12 +205,21 @@ async function linkedDirectoryMounts(link: string, directory: string): Promise<M
 
 async function workspaceMounts(cwd: string): Promise<Mount[]> {
   const mounts: Mount[] = [{ path: cwd, readOnly: false }];
-  const commonDir = await gitCommonDirectory(cwd);
-  if (commonDir) {
+  const git = await gitDirectories(cwd);
+  if (git) {
+    const { common: commonDir, own } = git;
     // A worktree's objects and refs live in the source checkout's .git, so commits need it
     // writable. Hooks and config run on the host whenever git runs there, so keep them read-only.
-    if (!commonDir.startsWith(`${cwd}${path.sep}`))
+    if (!commonDir.startsWith(`${cwd}${path.sep}`)) {
       mounts.push({ path: commonDir, readOnly: false });
+      // The repository's other worktrees are not mounted, so git here sees them as missing and
+      // `git worktree prune` would remove them, on the host too. Their entries stay read-only;
+      // this worktree's own (HEAD, index, logs) stays writable.
+      const worktrees = path.join(commonDir, "worktrees");
+      if (own.startsWith(`${worktrees}${path.sep}`)) {
+        mounts.push({ path: worktrees, readOnly: true }, { path: own, readOnly: false });
+      }
+    }
     const hooks = path.join(commonDir, "hooks");
     await mkdir(hooks, { recursive: true });
     mounts.push({ path: hooks, readOnly: true });

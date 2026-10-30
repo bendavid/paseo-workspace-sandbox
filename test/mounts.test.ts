@@ -123,3 +123,35 @@ test("removing a link leaves the project directory alone", async () => {
   expect(await lstat(linkMountPoints(link)).catch(() => null)).toBeNull();
   expect(await readFile(path.join(project, "README.md"), "utf8")).toBe("hi\n");
 });
+
+test("a worktree keeps the other worktrees' entries read-only and its own writable", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "sandbox-worktree-"));
+  roots.push(root);
+  const repo = path.join(root, "repo");
+  const git = (cwd: string, ...args: string[]) =>
+    execFileAsync("git", ["-C", cwd, "-c", "user.name=T", "-c", "user.email=t@t.test", ...args]);
+  await execFileAsync("git", ["init", "-q", "-b", "main", repo]);
+  await git(repo, "commit", "-q", "--allow-empty", "-m", "init");
+  const worktree = path.join(root, "wt");
+  await git(repo, "worktree", "add", "-q", "-b", "wt", worktree);
+  const target = {
+    container: "test",
+    label: "workspace=test",
+    image: "",
+    workspace: worktree,
+    workdir: worktree,
+    claude: { mode: "none" as const },
+  };
+  const gitDir = path.join(repo, ".git");
+  const mounts = (await resolveMounts(target, policy(""))).filter((mount) =>
+    mount.path.startsWith(root),
+  );
+  expect(mounts).toEqual([
+    { path: worktree, readOnly: false },
+    { path: gitDir, readOnly: false },
+    { path: path.join(gitDir, "worktrees"), readOnly: true },
+    { path: path.join(gitDir, "hooks"), readOnly: true },
+    { path: path.join(gitDir, "config"), readOnly: true },
+    { path: path.join(gitDir, "worktrees", "wt"), readOnly: false },
+  ]);
+});
