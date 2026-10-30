@@ -6,7 +6,14 @@ import { z } from "zod";
  * workspace from an image; Bubblewrap starts a fresh one for each launch from the host's
  * own system, read-only.
  */
-export const ENGINES = ["podman", "docker", "bubblewrap", "microsandbox"] as const;
+export const ENGINES = [
+  "podman",
+  "docker",
+  "bubblewrap",
+  "microsandbox",
+  "apptainer",
+  "singularity",
+] as const;
 export const EngineSchema = z.enum(ENGINES);
 export type Engine = z.infer<typeof EngineSchema>;
 
@@ -15,7 +22,29 @@ const ENGINE_LABELS: Record<Engine, string> = {
   docker: "Docker",
   bubblewrap: "Bubblewrap",
   microsandbox: "microsandbox",
+  apptainer: "Apptainer",
+  singularity: "Singularity",
 };
+
+export type Network = "host" | "bridge" | "none";
+
+/**
+ * The networks each engine can give a sandbox. Bubblewrap and Apptainer can share the host's
+ * network or have none, but have no separate one without root.
+ */
+export const ENGINE_NETWORKS: Record<Engine, readonly Network[]> = {
+  podman: ["host", "bridge", "none"],
+  docker: ["host", "bridge", "none"],
+  microsandbox: ["host", "bridge", "none"],
+  bubblewrap: ["host", "none"],
+  apptainer: ["host", "none"],
+  singularity: ["host", "none"],
+};
+
+/** Engines with a Run as host user choice; the others always run as you. */
+export function engineHasUserChoice(engine: Engine): boolean {
+  return engine === "podman" || engine === "docker" || engine === "microsandbox";
+}
 
 /** "Podman · node:22", or "Bubblewrap · host system". */
 export function describeProfile(profile: { engine: Engine; image: string }): string {
@@ -45,6 +74,20 @@ export function isFullImageReference(image: string): boolean {
 
 export const IMAGE_REFERENCE_HINT =
   "Use the full image reference, with its registry, such as docker.io/library/node:22";
+
+const SIF_ENGINES: readonly Engine[] = ["apptainer", "singularity"];
+
+/** A full image reference, or for Apptainer and Singularity also the absolute path of a SIF file. */
+export function isValidImage(engine: Engine, image: string): boolean {
+  if (SIF_ENGINES.includes(engine) && image.startsWith("/")) return true;
+  return isFullImageReference(image);
+}
+
+export function imageHint(engine: Engine): string {
+  return SIF_ENGINES.includes(engine)
+    ? `${IMAGE_REFERENCE_HINT}, or the absolute path of a .sif file`
+    : IMAGE_REFERENCE_HINT;
+}
 
 /** A saved sandbox configuration. Each workspace keeps a copy of the one it was created with. */
 export const ContainerProfileSchema = z.object({

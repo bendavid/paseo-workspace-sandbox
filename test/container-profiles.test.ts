@@ -69,3 +69,23 @@ test("requires a full image reference for engines that run one", async () => {
   );
   expect(store.get(bubblewrap.id).engine).toBe("bubblewrap");
 });
+
+test("refuses a network the engine does not have", async () => {
+  const store = new ContainerProfiles(await directory());
+  await store.load();
+  const values = { image: "", extraMounts: "", extraRunArgs: "" };
+  await expect(
+    store.save({ name: "Separate", engine: "bubblewrap", network: "bridge", ...values }, false),
+  ).rejects.toThrow(/no bridge network/);
+  await expect(
+    store.save(
+      { name: "Apptainer", engine: "apptainer", network: "bridge", ...values, image: "/a.sif" },
+      false,
+    ),
+  ).rejects.toThrow(/no bridge network/);
+  const none = await store.save(
+    { name: "Offline", engine: "apptainer", network: "none", ...values, image: "/a.sif" },
+    false,
+  );
+  expect(store.get(none.id).network).toBe("none");
+});

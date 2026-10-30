@@ -1,33 +1,24 @@
 // Runs real sandboxes with each engine that is installed. Images are never downloaded: an engine
-// without IMAGE is skipped.
+// without its image is skipped (see images.ts).
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
-import { backendFor, resolveEngineCli } from "../../server/backends/index";
+import { backendFor } from "../../server/backends/index";
 import { createLink, type ContainerPolicy, type ContainerTarget } from "../../server/container";
 import type { Engine } from "../../shared/rpc";
+import { engineImage } from "./images";
 
-const IMAGE = "docker.io/library/node:22-bookworm-slim";
 const roots: string[] = [];
 
 afterAll(async () => {
   for (const root of roots) await rm(root, { recursive: true, force: true });
 });
 
-/** The engine's command, or null when the engine or its image is not on this machine. */
-async function available(engine: Engine): Promise<string | null> {
-  const cli = await resolveEngineCli(engine).catch(() => null);
-  if (!cli) return null;
-  const { images } = backendFor(engine);
-  if (images && !(await images.localDigests(cli, IMAGE))) return null;
-  return cli;
-}
-
-const ENGINES: Engine[] = ["bubblewrap", "podman", "microsandbox"];
-const clis = Object.fromEntries(
-  await Promise.all(ENGINES.map(async (engine) => [engine, await available(engine)] as const)),
+const ENGINES: Engine[] = ["bubblewrap", "podman", "microsandbox", "apptainer", "singularity"];
+const setups = Object.fromEntries(
+  await Promise.all(ENGINES.map(async (engine) => [engine, await engineImage(engine)] as const)),
 );
 
 // Prints how the sandbox sees the link and the project, and writes through both.
@@ -42,8 +33,8 @@ const CHECK = [
 ].join("\n");
 
 describe.each(ENGINES)("a sandboxed directory with %s", (engine) => {
-  const cli = clis[engine];
-  test.skipIf(!cli).each([
+  const setup = setups[engine];
+  test.skipIf(!setup).each([
     ["without extra mounts", false],
     ["under a read-only extra mount", true],
   ])("runs at the link path %s", async (_label, covered) => {
@@ -57,7 +48,7 @@ describe.each(ENGINES)("a sandboxed directory with %s", (engine) => {
     const target: ContainerTarget = {
       container: `paseo-sandbox-e2e-${randomBytes(4).toString("hex")}`,
       label: "e2e=1",
-      image: IMAGE,
+      image: setup!.image,
       workspace: link,
       workdir: link,
       claude: { mode: "none" },
@@ -65,7 +56,7 @@ describe.each(ENGINES)("a sandboxed directory with %s", (engine) => {
     };
     const policy: ContainerPolicy = {
       engine,
-      cli: cli!,
+      cli: setup!.cli,
       network: "none",
       // Covers the link, which then shows inside as a symlink unless the plugin prevents it.
       extraMounts: covered ? `${root}:ro` : "",

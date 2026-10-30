@@ -11,13 +11,16 @@ import {
 import { useCallback, useState } from "react";
 import {
   DEFAULT_IMAGE,
-  IMAGE_REFERENCE_HINT,
+  ENGINE_NETWORKS,
   deleteContainerProfileRpc,
   engineUsesImage,
-  isFullImageReference,
+  engineHasUserChoice,
+  imageHint,
+  isValidImage,
   saveContainerProfileRpc,
   type ContainerProfile,
   type Engine,
+  type Network,
 } from "../shared/rpc";
 
 const ENGINE_OPTIONS = [
@@ -25,6 +28,8 @@ const ENGINE_OPTIONS = [
   { label: "Docker", value: "docker" },
   { label: "Bubblewrap (host system, no image)", value: "bubblewrap" },
   { label: "microsandbox (microVM)", value: "microsandbox" },
+  { label: "Apptainer", value: "apptainer" },
+  { label: "Singularity", value: "singularity" },
 ] as const;
 
 const DEFAULT_COMMANDS: Record<Engine, string> = {
@@ -32,6 +37,8 @@ const DEFAULT_COMMANDS: Record<Engine, string> = {
   docker: "docker",
   bubblewrap: "bwrap",
   microsandbox: "msb",
+  apptainer: "apptainer",
+  singularity: "singularity",
 };
 
 /** What each engine's run command is called, for the extra arguments hint. */
@@ -40,21 +47,34 @@ const RUN_COMMANDS: Record<Engine, string> = {
   docker: "docker run",
   bubblewrap: "bwrap",
   microsandbox: "msb create",
+  apptainer: "apptainer exec",
+  singularity: "singularity exec",
 };
 
 const NETWORK_HINTS: Record<Engine, string> = {
   podman: "Host lets agents reach the daemon on loopback",
   docker: "Host lets agents reach the daemon on loopback",
-  bubblewrap: "Host and Separate both share the host's network",
+  bubblewrap: "Host shares the host's network",
   microsandbox:
     "Host allows everything, including the host's loopback; Separate allows the internet",
+  apptainer: "Host shares the host's network",
+  singularity: "Host shares the host's network",
 };
 
-const NETWORKS = [
-  { label: "Host", value: "host" },
-  { label: "Separate", value: "bridge" },
-  { label: "None", value: "none" },
-] as const;
+const NETWORK_LABELS: Record<Network, string> = {
+  host: "Host",
+  bridge: "Separate",
+  none: "None",
+};
+
+/** The engine's networks; a choice it lacks, from a profile saved before, shows as Host. */
+function networkOptions(engine: Engine) {
+  return ENGINE_NETWORKS[engine].map((value) => ({ label: NETWORK_LABELS[value], value }));
+}
+
+function supportedNetwork(engine: Engine, network: Network): Network {
+  return ENGINE_NETWORKS[engine].includes(network) ? network : "host";
+}
 
 const BLANK: Omit<ContainerProfile, "id"> = {
   name: "",
@@ -87,7 +107,7 @@ function fields(profile: ContainerProfile): Draft {
     engine: profile.engine,
     cli: profile.cli ?? "",
     image: profile.image,
-    network: profile.network,
+    network: supportedNetwork(profile.engine, profile.network),
     extraMounts: profile.extraMounts,
     extraRunArgs: profile.extraRunArgs,
     runAsHostUser: profile.runAsHostUser !== false,
@@ -157,7 +177,13 @@ function EditorForm({
   );
   const selectEngine = useCallback((value: string) => {
     const choice = ENGINE_OPTIONS.find((option) => option.value === value);
-    if (choice) setDraft((current) => ({ ...current, engine: choice.value }));
+    if (choice) {
+      setDraft((current) => ({
+        ...current,
+        engine: choice.value,
+        network: supportedNetwork(choice.value, current.network),
+      }));
+    }
   }, []);
   const submit = useCallback(() => {
     saving.mutate({
@@ -198,13 +224,13 @@ function EditorForm({
         {needsImage ? (
           <SettingsInput
             label="Image"
-            hint={`${IMAGE_REFERENCE_HINT}. It must provide the agent CLIs, or mount them below`}
+            hint={`${imageHint(engine)}. It must provide the agent CLIs, or mount them below`}
             initialValue={draft.image}
             onChangeText={field("image")}
             disabled={busy}
           />
         ) : null}
-        {needsImage ? (
+        {engineHasUserChoice(engine) ? (
           <SettingsSwitch
             label="Run as host user"
             hint={
@@ -221,7 +247,7 @@ function EditorForm({
           label="Network"
           hint={NETWORK_HINTS[engine]}
           value={draft.network}
-          options={NETWORKS}
+          options={networkOptions(engine)}
           onValueChange={field("network")}
           disabled={busy}
         />
@@ -253,7 +279,7 @@ function EditorForm({
           actionLabel={saving.isPending ? "Saving…" : "Save"}
           onPress={submit}
           disabled={
-            busy || !draft.name.trim() || (needsImage && !isFullImageReference(draft.image.trim()))
+            busy || !draft.name.trim() || (needsImage && !isValidImage(engine, draft.image.trim()))
           }
           error={error}
         />

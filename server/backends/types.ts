@@ -10,6 +10,8 @@ export interface ImageStore {
   localDigests(cli: string, image: string): Promise<string[] | null>;
   /** Downloads the image. Only called after the user agreed to download that exact reference. */
   pull(cli: string, image: string): Promise<void>;
+  /** False for images that cannot be downloaded, such as a local file; missing, they fail. */
+  pullable?(image: string): boolean;
 }
 
 /**

@@ -53,15 +53,19 @@ deleting a profile never changes an existing sandbox; the Sandbox panel shows th
 Settings > Sandbox lists the profiles. The first profile uses Podman, or Docker when only Docker is
 installed. Profiles live in `container-profiles.json` in the plugin's data folder.
 
-| Engine       | Sandbox                          | Image | Network: Host / Separate / None               | Tested                |
-| ------------ | -------------------------------- | ----- | --------------------------------------------- | --------------------- |
-| Podman       | One container per workspace      | Yes   | `--network host` / `bridge` / `none`          | Yes                   |
-| Docker       | One container per workspace      | Yes   | as Podman                                     | Through podman-docker |
-| Bubblewrap   | One namespace sandbox per launch | No    | host network / host network / `--unshare-net` | Yes                   |
-| microsandbox | One microVM per workspace        | Yes   | `--net all` / `--net public` / `--no-net`     | Yes (0.7.11)          |
+| Engine                  | Sandbox                          | Image            | Network: Host / Separate / None                     | Tested                                  |
+| ----------------------- | -------------------------------- | ---------------- | --------------------------------------------------- | --------------------------------------- |
+| Podman                  | One container per workspace      | Yes              | `--network host` / `bridge` / `none`                | Yes                                     |
+| Docker                  | One container per workspace      | Yes              | as Podman                                           | Through podman-docker                   |
+| Bubblewrap              | One namespace sandbox per launch | No               | host network / not offered / `--unshare-net`        | Yes                                     |
+| microsandbox            | One microVM per workspace        | Yes              | `--net all` / `--net public` / `--no-net`           | Yes (0.7.11)                            |
+| Apptainer / Singularity | One container per launch         | Yes, or a `.sif` | host network / not offered / `--net --network none` | Apptainer 1.5.4 (also as `singularity`) |
+
+Bubblewrap, Apptainer, and Singularity have no separate network without root, so they offer only
+Host and None.
 
 The profile's **Command** is the engine's executable; empty means the default (`podman`, `docker`,
-`bwrap`, `msb`) on `PATH`, or `~/.microsandbox/bin/msb`. Container runtimes such as krun, gVisor,
+`bwrap`, `msb`, `apptainer`, `singularity`) on `PATH`, or `~/.microsandbox/bin/msb`. Container runtimes such as krun, gVisor,
 or Kata go in **Extra run arguments** (`--runtime krun`).
 
 - **Podman and Docker** keep a long-lived container that launches join with `exec`. Run as host
@@ -76,6 +80,20 @@ or Kata go in **Extra run arguments** (`--runtime krun`).
   folders over virtio-fs at the same paths, with `-u <uid>:<gid>` run as host user. Each launch's
   variables are passed as `-e NAME`, which keeps their values off its command line. libkrun does not
   strictly confine a guest to a shared folder's subtree, so share narrow folders.
+- **Apptainer and Singularity** start a fresh container per launch, like Bubblewrap, with
+  `apptainer exec --containall --cleanenv --writable-tmpfs`: no automatic mounts of your home,
+  the working directory, or `/tmp`, none of the daemon's environment, and a writable layer over the
+  read-only image for the launch. They run as you and add your account to the container's
+  `/etc/passwd` themselves, so there is no Run as host user setting; the home directory is a
+  scratch folder for the launch unless a mount covers it. The image is a full registry reference,
+  pulled with `apptainer pull` into `images/` in the plugin's data folder after you agree, with the
+  registry's digests recorded beside it for the freshness check, or the absolute path of a local
+  `.sif` file, used as it is. Both engines evaluate `--env`, `--env-file`, and `APPTAINERENV_*`
+  values as shell words, expanding `$` and command substitutions, so the plugin passes no value
+  through them: the base environment is written into a small `sh` loader, shell-quoted, and each
+  launch's variables arrive on an open file descriptor that the launcher deletes before the engine
+  starts. The Singularity engine uses the `singularity` command, SingularityCE's or Apptainer's
+  compatible one; only the latter is tested.
 - **BoxLite** is not supported: version 0.10.8 fails with more than two shared folders on x86_64
   (`IrqsExhausted`), and a sandbox needs at least three.
 
@@ -384,6 +402,7 @@ npm install
 npm run typecheck
 npm test
 npm run test:e2e       # real sandboxes with each installed engine; never downloads images
+SANDBOX_E2E_ALLOW_DOWNLOADS=1 npm run test:e2e   # also pulls busybox with Apptainer
 npm run format
 paseo plugin install "$PWD"
 paseo plugin reload workspace-sandbox   # after changes
@@ -391,8 +410,8 @@ paseo plugin reload workspace-sandbox   # after changes
 
 The unit tests use temporary folders and a fake `claude`; they never touch your own login or
 sandboxes. The end-to-end tests run throwaway sandboxes with Bubblewrap, and with Podman and
-microsandbox when `docker.io/library/node:22-bookworm-slim` is already present; an engine without
-it is skipped.
+microsandbox when `docker.io/library/node:22-bookworm-slim` is already present; Apptainer and
+Singularity use a `.sif` built from Podman's copy. An engine without its image is skipped.
 
 ## License
 

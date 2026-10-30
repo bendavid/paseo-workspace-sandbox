@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import type { Engine } from "../../shared/rpc";
 import { isPodman, which, type ContainerPolicy, type ContainerTarget } from "../container";
+import { apptainerBackend } from "./apptainer";
 import { bubblewrapBackend } from "./bubblewrap";
 import { microsandboxBackend } from "./microsandbox";
 import { ociBackend } from "./oci";
@@ -17,6 +18,8 @@ const BACKENDS: Record<Engine, SandboxBackend> = {
   docker: ociBackend,
   bubblewrap: bubblewrapBackend,
   microsandbox: microsandboxBackend,
+  apptainer: apptainerBackend,
+  singularity: apptainerBackend,
 };
 
 export const DEFAULT_COMMANDS: Record<Engine, string> = {
@@ -24,6 +27,8 @@ export const DEFAULT_COMMANDS: Record<Engine, string> = {
   docker: "docker",
   bubblewrap: "bwrap",
   microsandbox: "msb",
+  apptainer: "apptainer",
+  singularity: "singularity",
 };
 
 // Where the installers put these; a daemon started from a desktop session may not have them on

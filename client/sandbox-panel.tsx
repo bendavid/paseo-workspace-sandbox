@@ -13,6 +13,7 @@ import { Text } from "react-native";
 import {
   chooseImageRpc,
   describeProfile,
+  engineHasUserChoice,
   openSandboxShellRpc,
   sandboxStatusRpc,
   type ClaudeLogin,
@@ -198,7 +199,8 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
           </SettingsRow>
           <SettingsRow label="User">
             <Text style={styles.value}>
-              {sandbox.profile.engine === "bubblewrap" || sandbox.profile.runAsHostUser !== false
+              {!engineHasUserChoice(sandbox.profile.engine) ||
+              sandbox.profile.runAsHostUser !== false
                 ? "You (host user)"
                 : "The image's default user"}
             </Text>

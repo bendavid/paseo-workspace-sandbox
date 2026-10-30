@@ -13,6 +13,7 @@ You need one of these on the daemon's machine:
 - **Podman** or **Docker**: one long-lived container per workspace.
 - **microsandbox** (`msb`): one microVM per workspace.
 - **Bubblewrap** (`bwrap`): a fresh sandbox per launch with your system's `/usr` and `/etc` read-only, so it uses the tools installed on the host. It needs unprivileged user namespaces.
+- **Apptainer** or **Singularity**: a fresh container per launch from an image, running as you. The image is a registry reference the plugin downloads after you agree, or a local `.sif` file.
 
 Container profiles, in the form and in Settings > Sandbox, hold the engine, image, network (host, separate or none), extra folders to mount (read-write or read-only), extra engine arguments, and whether to run as you. Running as you, the default, uses your user and group IDs and your home folder path, and adds an account for you inside the sandbox, so files the agents write belong to you; otherwise the image's own default user and home are used. The first profile uses Podman, or Docker when only Docker is installed, with the `docker.io/library/node:22-bookworm-slim` image. Images are full references that name their registry. That image has no agent CLIs: use an image that installs them, or mount them from the host.
 

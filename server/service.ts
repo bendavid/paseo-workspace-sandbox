@@ -26,9 +26,10 @@ import { listRefs } from "./git";
 import { resolveTerminalLaunch } from "./terminals";
 import { writeFileAtomic, type SandboxStore } from "./store";
 import {
-  IMAGE_REFERENCE_HINT,
+  engineHasUserChoice,
   engineUsesImage,
-  isFullImageReference,
+  imageHint,
+  isValidImage,
   type ContainerProfile,
   type ContainerStatus,
   type ImageChoice,
@@ -179,8 +180,8 @@ export class SandboxService {
       network: profile.network,
       extraMounts: profile.extraMounts,
       extraRunArgs: profile.extraRunArgs,
-      // Bubblewrap always runs as you; profiles from before the setting do too.
-      runAsHostUser: profile.engine === "bubblewrap" || profile.runAsHostUser !== false,
+      // Engines without the choice always run as you; profiles from before the setting do too.
+      runAsHostUser: !engineHasUserChoice(profile.engine) || profile.runAsHostUser !== false,
     };
   }
 
@@ -231,6 +232,8 @@ export class SandboxService {
     const { image } = record.profile;
     const state = await checkImage(image, await images.localDigests(policy.cli, image));
     if (state === "current" || state === "unverified") return;
+    if (images.pullable?.(image) === false)
+      throw new Error(`The image file ${image} does not exist`);
     const choice = this.imageChoices.get(record.workspaceId);
     if (choice?.image === image && choice.action === "local" && state === "outdated") return;
     if (choice?.image !== image || choice.action !== "download") {
@@ -358,8 +361,8 @@ export class SandboxService {
       throw new Error("A sandboxed worktree needs a Git project");
     }
     const policy = await this.policy(profile);
-    if (engineUsesImage(policy.engine) && !isFullImageReference(profile.image)) {
-      throw new Error(`${IMAGE_REFERENCE_HINT}, in the container profile "${profile.name}"`);
+    if (engineUsesImage(policy.engine) && !isValidImage(policy.engine, profile.image)) {
+      throw new Error(`${imageHint(policy.engine)}, in the container profile "${profile.name}"`);
     }
     if (input.imageChoice && input.imageChoice.image !== profile.image) {
       throw new Error(
@@ -428,7 +431,10 @@ export class SandboxService {
   async imageStatus(profileId: string | undefined): Promise<RpcOutput<typeof imageStatusRpc>> {
     const profile = this.containerProfiles.get(profileId);
     const { images } = backendFor(profile.engine);
-    if (!images) return { image: null, state: "current" };
+    // A local image file is never downloaded; a missing one fails when the sandbox starts.
+    if (!images || images.pullable?.(profile.image) === false) {
+      return { image: null, state: "current" };
+    }
     const policy = await this.policy(profile);
     const local = await images.localDigests(policy.cli, profile.image);
     return { image: profile.image, state: await checkImage(profile.image, local) };

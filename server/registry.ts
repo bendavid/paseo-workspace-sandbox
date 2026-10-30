@@ -145,3 +145,25 @@ export async function checkImage(
     return "unverified";
   }
 }
+
+/**
+ * The registry's digests for an image's tag now: the index digest and this platform's manifest
+ * digest, so a copy pulled now can later be compared like the engines' own. Null when the
+ * registry can't be asked.
+ */
+export async function remoteDigests(image: string): Promise<string[] | null> {
+  const reference = parseImageReference(image);
+  if (!reference) return null;
+  if (reference.digest) return [reference.digest];
+  try {
+    const head = await manifestRequest(reference, "HEAD");
+    const digest = head?.headers.get("docker-content-digest");
+    if (!digest) return null;
+    const isIndex = /index|manifest\.list/.test(head?.headers.get("content-type") ?? "");
+    const platform = isIndex ? await platformDigest(reference) : null;
+    return platform ? [digest, platform] : [digest];
+  } catch (error) {
+    console.error(`Could not ask the registry about ${image}`, error);
+    return null;
+  }
+}
