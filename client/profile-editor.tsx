@@ -64,6 +64,7 @@ const BLANK: Omit<ContainerProfile, "id"> = {
   network: "host",
   extraMounts: "",
   extraRunArgs: "",
+  runAsHostUser: true,
 };
 
 export type ProfileEditorTarget =
@@ -89,6 +90,7 @@ function fields(profile: ContainerProfile): Draft {
     network: profile.network,
     extraMounts: profile.extraMounts,
     extraRunArgs: profile.extraRunArgs,
+    runAsHostUser: profile.runAsHostUser !== false,
   };
 }
 
@@ -199,6 +201,19 @@ function EditorForm({
             hint={`${IMAGE_REFERENCE_HINT}. It must provide the agent CLIs, or mount them below`}
             initialValue={draft.image}
             onChangeText={field("image")}
+            disabled={busy}
+          />
+        ) : null}
+        {needsImage ? (
+          <SettingsSwitch
+            label="Run as host user"
+            hint={
+              draft.runAsHostUser !== false
+                ? "Your uid and gid, with your home path as HOME and an account for you in the image"
+                : "The image's default user and home; files it writes to mounts may belong to that user"
+            }
+            value={draft.runAsHostUser !== false}
+            onValueChange={field("runAsHostUser")}
             disabled={busy}
           />
         ) : null}

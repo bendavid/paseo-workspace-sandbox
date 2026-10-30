@@ -13,6 +13,8 @@ export interface ContainerPolicy {
   network: "host" | "bridge" | "none";
   extraMounts: string;
   extraRunArgs: string;
+  /** Your uid, gid, and home inside, or the image's default user and home. */
+  runAsHostUser: boolean;
 }
 
 export interface Mount {
@@ -282,13 +284,7 @@ export async function resolveMounts(
     ? await linkedDirectoryMounts(target.workspace, target.linkedDirectory)
     : await workspaceMounts(target.workspace);
   mounts.push(...claudeMounts(target.claude));
-  // Agent credentials and session state for the providers the wrapper can launch. The daemon reads
-  // history from these directories on the host, so sessions must be written to the same place.
-  // Custom ACP agents keep state elsewhere; add it under extra mounts.
-  for (const owned of [".codex", ".copilot", ".pi", ".omp"]) {
-    const directory = path.join(homedir(), owned);
-    if (existsSync(directory)) mounts.push({ path: directory, readOnly: false });
-  }
+  for (const directory of providerDirectories()) mounts.push({ path: directory, readOnly: false });
   for (const mount of extra) {
     if (!existsSync(mount.path)) throw new Error(`Extra mount ${mount.path} does not exist`);
   }
@@ -299,14 +295,37 @@ export async function resolveMounts(
   );
 }
 
+/**
+ * Agent credentials and session state for the providers the wrapper can launch, mounted at their
+ * host paths. The daemon reads history from these directories on the host, so sessions must be
+ * written to the same place. Custom ACP agents keep state elsewhere; add it under extra mounts.
+ */
+export function providerDirectories(): string[] {
+  return [".codex", ".copilot", ".pi", ".omp"]
+    .map((owned) => path.join(homedir(), owned))
+    .filter((directory) => existsSync(directory));
+}
+
 /** The environment every engine gives its sandbox, besides what each launch forwards. */
-export function baseEnvironment(target: ContainerTarget): Array<[string, string]> {
+export function baseEnvironment(
+  target: ContainerTarget,
+  runAsHostUser: boolean,
+): Array<[string, string]> {
   const { claude } = target;
   const plugins = claude.mode === "private" ? path.join(claude.hostConfigDir, "plugins") : null;
   return [
-    // HOME keeps the host path so mounted credentials resolve.
-    ["HOME", homedir()],
-    ["USER", userInfo().username],
+    ...(runAsHostUser
+      ? [
+          // HOME keeps the host path so mounted credentials resolve.
+          ["HOME", homedir()] as [string, string],
+          ["USER", userInfo().username] as [string, string],
+        ]
+      : [
+          // The image's own user may not own the mounted files, which git otherwise refuses.
+          ["GIT_CONFIG_COUNT", "1"] as [string, string],
+          ["GIT_CONFIG_KEY_0", "safe.directory"] as [string, string],
+          ["GIT_CONFIG_VALUE_0", "*"] as [string, string],
+        ]),
     // Keeps Claude's .claude.json inside the mounted directory instead of a bind-mounted file,
     // which Claude replaces by rename.
     ...(claude.mode === "none"
@@ -322,4 +341,47 @@ export function baseEnvironment(target: ContainerTarget): Array<[string, string]
 /** Extra run arguments split on whitespace, as each engine receives them. */
 export function extraArguments(policy: ContainerPolicy): string[] {
   return policy.extraRunArgs.split(/\s+/).filter(Boolean);
+}
+
+/**
+ * Run as root inside a sandbox just created to run as you: your uid and gid get your name, group,
+ * and home, replacing whatever the image had for them or for those names, so tools that read the
+ * account (OpenSSH looks for ~/.ssh there, `whoami`, prompts) agree with HOME. The shell is
+ * /bin/sh, which every image has; sandboxed terminals start bash when there is one.
+ */
+export const HOST_ACCOUNT_SCRIPT = [
+  "name=$1 uid=$2 gid=$3 group=$4 home=$5",
+  "replace() {",
+  "  file=$1 id=$2 key=$3 line=$4",
+  '  [ -f "$file" ] || : >"$file"',
+  '  awk -F: -v id="$id" -v key="$key" \'$3 != id && $1 != key\' "$file" >"$file.paseo-new"',
+  '  printf \'%s\\n\' "$line" >>"$file.paseo-new"',
+  '  cat "$file.paseo-new" >"$file" && rm -f "$file.paseo-new"',
+  "}",
+  'replace /etc/passwd "$uid" "$name" "$name:x:$uid:$gid::$home:/bin/sh"',
+  'replace /etc/group "$gid" "$group" "$group:x:$gid:"',
+].join("\n");
+
+/**
+ * Run as the image's default user inside a sandbox just created to run as that user: links its
+ * home's provider folders to the mounted host ones, so the agents find their credentials.
+ */
+export const PROVIDER_LINKS_SCRIPT = [
+  "for directory; do",
+  "  link=$HOME/${directory##*/}",
+  '  [ -e "$link" ] || [ -L "$link" ] || ln -s "$directory" "$link" 2>/dev/null || true',
+  "done",
+].join("\n");
+
+/** The host account the host-account script writes: your name, uid, gid, group, and home. */
+export async function hostAccount(): Promise<string[]> {
+  const user = userInfo();
+  const { stdout } = await execCommand("id", ["-gn"]);
+  return [
+    user.username,
+    String(user.uid),
+    String(user.gid),
+    stdout.trim() || user.username,
+    homedir(),
+  ];
 }

@@ -196,6 +196,13 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
           <SettingsRow label="Network">
             <Text style={styles.value}>{sandbox.profile.network}</Text>
           </SettingsRow>
+          <SettingsRow label="User">
+            <Text style={styles.value}>
+              {sandbox.profile.engine === "bubblewrap" || sandbox.profile.runAsHostUser !== false
+                ? "You (host user)"
+                : "The image's default user"}
+            </Text>
+          </SettingsRow>
           {sandbox.profile.extraMounts ? (
             <SettingsRow label="Extra mounts">
               <Text style={styles.value}>{sandbox.profile.extraMounts}</Text>

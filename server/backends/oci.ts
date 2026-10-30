@@ -1,9 +1,13 @@
 import { userInfo } from "node:os";
 import type { ContainerStatus } from "../../shared/rpc";
 import {
+  HOST_ACCOUNT_SCRIPT,
+  PROVIDER_LINKS_SCRIPT,
   baseEnvironment,
   extraArguments,
+  hostAccount,
   isPodman,
+  providerDirectories,
   resolveMounts,
   runCli,
   shellQuote,
@@ -18,11 +22,14 @@ async function containerOptions(
   policy: ContainerPolicy,
 ): Promise<string[]> {
   const user = userInfo();
-  // Files the container writes keep your ownership: Podman maps your uid into its namespace,
-  // Docker runs the process as your uid.
-  const identity = (await isPodman(policy.cli))
-    ? ["--userns=keep-id"]
-    : ["--user", `${user.uid}:${user.gid}`];
+  // As you, files the container writes keep your ownership: Podman maps your uid into its
+  // namespace, Docker runs the process as your uid. Otherwise the image's default user runs.
+  let identity: string[] = [];
+  if (policy.runAsHostUser) {
+    identity = (await isPodman(policy.cli))
+      ? ["--userns=keep-id"]
+      : ["--user", `${user.uid}:${user.gid}`];
+  }
   const mounts = (await resolveMounts(target, policy)).flatMap((mount) => [
     "-v",
     `${mount.source ?? mount.path}:${mount.path}${mount.readOnly ? ":ro" : ""}`,
@@ -35,7 +42,10 @@ async function containerOptions(
     ...identity,
     "--workdir",
     target.workdir,
-    ...baseEnvironment(target).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
+    ...baseEnvironment(target, policy.runAsHostUser).flatMap(([name, value]) => [
+      "-e",
+      `${name}=${value}`,
+    ]),
     ...mounts,
     ...extraArguments(policy),
   ];
@@ -53,6 +63,43 @@ async function inspect(cli: string, name: string): Promise<ContainerStatus> {
     return stdout.trim() === "true" ? { state: "running" } : { state: "stopped" };
   } catch {
     return { state: "missing" };
+  }
+}
+
+/**
+ * Once, in a container just created: your account, as root, when it runs as you; otherwise links
+ * to the provider folders in the image user's home. A failure leaves a working sandbox, so it is
+ * logged rather than thrown.
+ */
+async function prepareUser(target: ContainerTarget, policy: ContainerPolicy): Promise<void> {
+  try {
+    if (policy.runAsHostUser) {
+      await runCli(policy.cli, [
+        "exec",
+        "--user",
+        "0",
+        target.container,
+        "sh",
+        "-c",
+        HOST_ACCOUNT_SCRIPT,
+        "sh",
+        ...(await hostAccount()),
+      ]);
+      return;
+    }
+    const directories = providerDirectories();
+    if (directories.length === 0) return;
+    await runCli(policy.cli, [
+      "exec",
+      target.container,
+      "sh",
+      "-c",
+      PROVIDER_LINKS_SCRIPT,
+      "sh",
+      ...directories,
+    ]);
+  } catch (error) {
+    console.error(`Preparing the user of ${target.container} failed`, error);
   }
 }
 
@@ -102,6 +149,7 @@ export const ociBackend: SandboxBackend = {
       ],
       { long: true },
     );
+    await prepareUser(target, policy);
   },
 
   status: (target, policy) => inspect(policy.cli, target.container),

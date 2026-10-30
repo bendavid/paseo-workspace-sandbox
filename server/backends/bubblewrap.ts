@@ -80,7 +80,7 @@ async function sandboxArguments(
 function environmentArguments(target: ContainerTarget): string[] {
   return [
     "--clearenv",
-    ...[["PATH", DEFAULT_PATH] as [string, string], ...baseEnvironment(target)].flatMap(
+    ...[["PATH", DEFAULT_PATH] as [string, string], ...baseEnvironment(target, true)].flatMap(
       ([name, value]) => ["--setenv", name, value],
     ),
   ];

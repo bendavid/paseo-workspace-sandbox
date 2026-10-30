@@ -70,6 +70,7 @@ describe.each(ENGINES)("a sandboxed directory with %s", (engine) => {
       // Covers the link, which then shows inside as a symlink unless the plugin prevents it.
       extraMounts: covered ? `${root}:ro` : "",
       extraRunArgs: "",
+      runAsHostUser: true,
     };
     const output = await backendFor(engine).runOnce(target, policy, [
       "sh",

@@ -63,6 +63,12 @@ export const ContainerProfileSchema = z.object({
   extraMounts: z.string(),
   // Whitespace-separated arguments added to `run`, such as `--memory 4g -e PATH=/opt/bin:/usr/bin`.
   extraRunArgs: z.string(),
+  /**
+   * Podman, Docker, and microsandbox: run as your uid and gid with your home path as HOME and an
+   * account for you in the image, or, when false, as the image's own default user and home.
+   * Bubblewrap always runs as you. Profiles from before this setting run as you.
+   */
+  runAsHostUser: z.boolean().optional(),
 });
 
 export type ContainerProfile = z.infer<typeof ContainerProfileSchema>;

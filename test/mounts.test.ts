@@ -22,7 +22,14 @@ afterEach(async () => {
 });
 
 function policy(extraMounts: string): ContainerPolicy {
-  return { engine: "bubblewrap", cli: "bwrap", network: "host", extraMounts, extraRunArgs: "" };
+  return {
+    engine: "bubblewrap",
+    cli: "bwrap",
+    network: "host",
+    extraMounts,
+    extraRunArgs: "",
+    runAsHostUser: true,
+  };
 }
 
 test("parses extra mounts one per line or comma separated, with ~ and :ro", () => {

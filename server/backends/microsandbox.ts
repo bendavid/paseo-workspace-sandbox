@@ -1,8 +1,12 @@
 import { userInfo } from "node:os";
 import type { ContainerStatus } from "../../shared/rpc";
 import {
+  HOST_ACCOUNT_SCRIPT,
+  PROVIDER_LINKS_SCRIPT,
   baseEnvironment,
   extraArguments,
+  hostAccount,
+  providerDirectories,
   resolveMounts,
   runCli,
   shellQuote,
@@ -21,10 +25,13 @@ async function sandboxOptions(target: ContainerTarget, policy: ContainerPolicy):
   return [
     "-w",
     target.workdir,
-    // Commands run as your uid, as in the container engines.
-    "-u",
-    `${user.uid}:${user.gid}`,
-    ...baseEnvironment(target).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
+    // As you, commands run as your uid, as in the container engines; otherwise as the image's
+    // default user.
+    ...(policy.runAsHostUser ? ["-u", `${user.uid}:${user.gid}`] : []),
+    ...baseEnvironment(target, policy.runAsHostUser).flatMap(([name, value]) => [
+      "-e",
+      `${name}=${value}`,
+    ]),
     ...mounts,
     ...network(policy),
     // Images download only through `pull`, after the user agreed; see ImageStore.
@@ -55,6 +62,41 @@ async function inspect(cli: string, name: string): Promise<ContainerStatus> {
   return typeof status === "string" && /running/i.test(status)
     ? { state: "running" }
     : { state: "stopped" };
+}
+
+/** Once, in a microVM just created; see prepareUser in oci.ts. */
+async function prepareUser(target: ContainerTarget, policy: ContainerPolicy): Promise<void> {
+  try {
+    if (policy.runAsHostUser) {
+      await runCli(policy.cli, [
+        "exec",
+        "-u",
+        "0:0",
+        target.container,
+        "--",
+        "sh",
+        "-c",
+        HOST_ACCOUNT_SCRIPT,
+        "sh",
+        ...(await hostAccount()),
+      ]);
+      return;
+    }
+    const directories = providerDirectories();
+    if (directories.length === 0) return;
+    await runCli(policy.cli, [
+      "exec",
+      target.container,
+      "--",
+      "sh",
+      "-c",
+      PROVIDER_LINKS_SCRIPT,
+      "sh",
+      ...directories,
+    ]);
+  } catch (error) {
+    console.error(`Preparing the user of ${target.container} failed`, error);
+  }
 }
 
 /**
@@ -100,6 +142,7 @@ export const microsandboxBackend: SandboxBackend = {
       ],
       { long: true },
     );
+    await prepareUser(target, policy);
   },
 
   status: (target, policy) => inspect(policy.cli, target.container),

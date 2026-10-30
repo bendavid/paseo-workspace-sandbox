@@ -179,6 +179,8 @@ export class SandboxService {
       network: profile.network,
       extraMounts: profile.extraMounts,
       extraRunArgs: profile.extraRunArgs,
+      // Bubblewrap always runs as you; profiles from before the setting do too.
+      runAsHostUser: profile.engine === "bubblewrap" || profile.runAsHostUser !== false,
     };
   }
 

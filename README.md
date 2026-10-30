@@ -64,15 +64,16 @@ The profile's **Command** is the engine's executable; empty means the default (`
 `bwrap`, `msb`) on `PATH`, or `~/.microsandbox/bin/msb`. Container runtimes such as krun, gVisor,
 or Kata go in **Extra run arguments** (`--runtime krun`).
 
-- **Podman and Docker** keep a long-lived container that launches join with `exec`. Podman runs with
-  `--userns=keep-id` and Docker with `--user <uid>:<gid>`, so files keep your ownership.
+- **Podman and Docker** keep a long-lived container that launches join with `exec`. Run as host
+  user, Podman uses `--userns=keep-id` and Docker `--user <uid>:<gid>`; see
+  [User](#user).
 - **Bubblewrap** keeps nothing between launches: each one is a fresh sandbox with the host's `/usr`,
   `/etc`, and `/opt` read-only, its own `/proc`, `/dev`, `/tmp`, and `/run`, the sandbox's mounts,
   and a clean environment. Tools are the host's own. The home directory is a scratch folder for the
   launch unless a mount covers it. It needs unprivileged user namespaces; starting the sandbox runs
   `true` in one, so a host without them shows a start failure. Extra run arguments go to `bwrap`.
 - **microsandbox** keeps a libkrun microVM per workspace and joins it with `exec`, sharing host
-  folders over virtio-fs at the same paths and running commands as your uid. Each launch's
+  folders over virtio-fs at the same paths, with `-u <uid>:<gid>` run as host user. Each launch's
   variables are passed as `-e NAME`, which keeps their values off its command line. libkrun does not
   strictly confine a guest to a shared folder's subtree, so share narrow folders.
 - **BoxLite** is not supported: version 0.10.8 fails with more than two shared folders on x86_64
@@ -99,10 +100,28 @@ host too. Their entries stay read-only, so pruning them fails, as does `git work
 work. A sandboxed directory shares the project directory by
 design and has no `.git` handling.
 
-`HOME` keeps the host path, but nothing else of the home directory is mounted. A container engine
-creates it owned by root as the parent of the provider directories, so it is not writable: tools
-that write elsewhere in `~`, such as npm's cache, `~/.cache`, or `~/.config`, fail until you add
-those directories, or `~` itself, under extra mounts.
+### User
+
+The profile's **Run as host user** setting, on by default, applies to Podman, Docker, and
+microsandbox; Bubblewrap always runs as you.
+
+- **On:** commands run as your uid and gid, `HOME` is your host home path, and `USER` your user
+  name. When the sandbox is created, the plugin writes an account for you into its `/etc/passwd`
+  and `/etc/group`, with your name, group, home, and `/bin/sh`, replacing whatever the image had
+  for that uid or name, such as the Node images' `node` account for uid 1000. Tools that read the
+  account instead of `HOME`, such as OpenSSH looking for `~/.ssh`, then agree with `HOME`. Files
+  written to mounts belong to you.
+- **Off:** commands run as the image's default user, often root, with its own home and dotfiles.
+  The provider folders are still mounted at their host paths, and linked from the image user's
+  home (`~/.codex` and so on) so agents find them. Files written to mounts belong to whoever that
+  user maps to: you with rootless Podman's root and with microsandbox, but root with Docker's
+  root, or another uid for a non-root image user. Git is told to accept repositories owned by
+  others (`safe.directory`), since it otherwise refuses them.
+
+When running as host user, only the explicit mounts exist under `HOME`. A container engine creates it owned
+by root as the parent of the provider directories, so it is not writable: tools that write
+elsewhere in `~`, such as npm's cache, `~/.cache`, or `~/.config`, fail until you add those
+directories, or `~` itself, under extra mounts.
 
 Extra mounts are host paths, one per line or comma separated, with `:ro` for read-only. They may
 contain the mounts above: mounts are applied parents first, so `~:ro` gives a read-only home around
@@ -164,7 +183,8 @@ the shell would be slower, and anything the dotfiles print would reach the agent
   secrets. A recreated container captures again. Delete the file to pick up changed dotfiles.
 - Variables `sandbox-run` forwards for each launch (`PASEO_*`, provider, and locale variables)
   override captured ones.
-- Your dotfiles only take part when an extra mount covers them, such as `~:ro`.
+- Running as host user, your dotfiles only take part when an extra mount covers them, such as
+  `~:ro`; otherwise the image user's own dotfiles do.
 
 ## Claude Code sign-in
 
