@@ -61,11 +61,16 @@ export const ociBackend: SandboxBackend = {
   persistent: true,
 
   images: {
-    async exists(cli, image) {
-      return runCli(cli, ["image", "inspect", "--format", "{{.Id}}", image]).then(
-        () => true,
-        () => false,
-      );
+    async localDigests(cli, image) {
+      let raw: string;
+      try {
+        raw = await runCli(cli, ["image", "inspect", "--format", "{{json .RepoDigests}}", image]);
+      } catch {
+        return null;
+      }
+      // `repository@sha256:…` for each digest the image was pulled by.
+      const repoDigests = (JSON.parse(raw.trim() || "null") as string[] | null) ?? [];
+      return repoDigests.map((entry) => entry.slice(entry.indexOf("@") + 1));
     },
     async pull(cli, image) {
       await runCli(cli, ["pull", image], { long: true });

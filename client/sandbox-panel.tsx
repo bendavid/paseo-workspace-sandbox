@@ -17,6 +17,7 @@ import {
   sandboxStatusRpc,
   type ClaudeLogin,
   type ContainerStatus,
+  type ImageDownload,
 } from "../shared/rpc";
 
 function describe(container: ContainerStatus): string {
@@ -61,6 +62,38 @@ function startErrors(container: ContainerStatus, login: ClaudeLogin | null): str
   return errors;
 }
 
+/** The user's go-ahead for the download a sandbox waits for, naming the exact image. */
+function ImageDownloadAction({
+  download,
+  onDownload,
+  pending,
+  error,
+}: {
+  download: ImageDownload;
+  onDownload(image: string): void;
+  pending: boolean;
+  error: string | null;
+}) {
+  const { image, reason } = download;
+  const start = useCallback(() => onDownload(image), [image, onDownload]);
+  return (
+    <SettingsCard>
+      <SettingsAction
+        label={reason === "outdated" ? "Update the image" : "Download the image"}
+        hint={
+          reason === "outdated"
+            ? `The registry has a newer ${image}`
+            : `From its registry: ${image}`
+        }
+        actionLabel={`${reason === "outdated" ? "Update" : "Download"} ${image}`}
+        onPress={start}
+        disabled={pending}
+        error={error}
+      />
+    </SettingsCard>
+  );
+}
+
 export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePanelProps) {
   const getStatus = useRpc(sandboxStatusRpc);
   const openShell = useRpc(openSandboxShellRpc);
@@ -77,6 +110,10 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
     mutationFn: requestDownload,
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["status", workspaceId] }),
   });
+  const startDownload = useCallback(
+    (image: string) => download.mutate({ workspaceId, image }),
+    [download, workspaceId],
+  );
   const styles = useMemo(
     () => ({
       content: { padding: layout.compact ? 16 : 24, gap: 16 },
@@ -114,19 +151,15 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
           {error}
         </Text>
       ))}
-      {container.state === "failed" && container.missingImage ? (
-        <SettingsCard>
-          <SettingsAction
-            label="Download the image"
-            hint={`From its registry: ${container.missingImage}`}
-            actionLabel={`Download ${container.missingImage}`}
-            onPress={() => download.mutate({ workspaceId, image: container.missingImage ?? "" })}
-            disabled={download.isPending}
-            error={download.error?.message ?? null}
-          />
-        </SettingsCard>
+      {container.state === "failed" && container.download ? (
+        <ImageDownloadAction
+          download={container.download}
+          onDownload={startDownload}
+          pending={download.isPending}
+          error={download.error?.message ?? null}
+        />
       ) : null}
-      {container.state === "failed" && !container.missingImage ? (
+      {container.state === "failed" && !container.download ? (
         <Text style={styles.detail}>
           Starting an agent or opening a sandboxed terminal tries again. The daemon log has the full
           output.

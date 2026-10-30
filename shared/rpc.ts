@@ -103,17 +103,25 @@ export const ClaudeLoginSchema = z.discriminatedUnion("state", [
 
 export type ClaudeLogin = z.infer<typeof ClaudeLoginSchema>;
 
+/** An image download the sandbox needs the user's go-ahead for: missing, or older than its tag's. */
+export const ImageDownloadSchema = z.object({
+  image: z.string(),
+  reason: z.enum(["missing", "outdated"]),
+});
+
+export type ImageDownload = z.infer<typeof ImageDownloadSchema>;
+
 export const ContainerStatusSchema = z.discriminatedUnion("state", [
   /** `downloading` names the image being pulled. */
   z.object({ state: z.literal("starting"), downloading: z.string().optional() }),
   z.object({ state: z.literal("running") }),
   z.object({ state: z.literal("stopped") }),
   z.object({ state: z.literal("missing") }),
-  /** `missingImage`: the image is not on this machine and needs the user's go-ahead to download. */
+  /** `download`: the image needs downloading, which waits for the user's go-ahead. */
   z.object({
     state: z.literal("failed"),
     error: z.string(),
-    missingImage: z.string().optional(),
+    download: ImageDownloadSchema.optional(),
   }),
 ]);
 
@@ -135,8 +143,8 @@ export const createSandboxedWorkspaceRpc = defineRpc({
     baseRef: z.string().trim().min(1).optional(),
     title: z.string().trim().min(1).optional(),
     /**
-     * The profile's image, when the user agreed to download it if it is missing. Without it,
-     * nothing is downloaded and a missing image fails the sandbox's start.
+     * The profile's image, when the user agreed to download it if it is missing or outdated.
+     * Without it, nothing is downloaded and such an image fails the sandbox's start.
      */
     downloadImage: z.string().min(1).optional(),
   }),
@@ -236,12 +244,18 @@ export const openSandboxShellRpc = defineRpc({
   output: z.object({ terminalId: z.string() }),
 });
 
-/** Whether a profile's image is on this machine, so the form can ask before downloading it. */
+/**
+ * Whether a profile's image is on this machine and current with its registry, so the form can ask
+ * before downloading it. `unverified`: present, but the registry could not be asked.
+ */
 export const imageStatusRpc = defineRpc({
   name: "sandbox.image.status",
   input: z.object({ profileId: z.string().min(1).optional() }),
   /** `image` is null for engines that run the host's system. */
-  output: z.object({ image: z.string().nullable(), present: z.boolean() }),
+  output: z.object({
+    image: z.string().nullable(),
+    state: z.enum(["current", "missing", "outdated", "unverified"]),
+  }),
 });
 
 /** Downloads a workspace's image, which the user named, and starts its sandbox. */

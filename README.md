@@ -107,16 +107,28 @@ Engines other than Bubblewrap run an image, given as a full reference that names
 (`docker.io/library/node:22`, `localhost/agents`): engines resolve short names differently, and
 the download confirmation shows exactly what is fetched.
 
-Nothing downloads an image without your go-ahead. Every run and create passes `--pull never`, and
-the plugin pulls only after you agree to that exact reference:
+Sandboxes are created from the current version of their image, and nothing downloads an image
+without your go-ahead. Every run and create passes `--pull never`, and the plugin pulls only after
+you agree to that exact reference.
 
-- When the selected profile's image is missing, Create asks first: **Create workspace and download
-  `<image>`**, or Cancel, which creates and downloads nothing.
-- When a sandbox needs an image that is not there, such as after the image was removed, its start
-  fails without downloading, and the Sandbox panel offers **Download `<image>`**. Retries, daemon
-  restarts, and agent launches never download.
-- Resuming an existing container or microVM needs no image download. Only the Claude folder check
-  and creating the sandbox run the image.
+Whenever the plugin is about to run the image, for the Claude folder check or to create the
+container or microVM (retries included), it compares the local copy with the registry:
+
+- It asks the registry for the tag's current digest with a `HEAD` request, answering the
+  registry's anonymous token challenge. Docker and Podman record that index digest, so this
+  settles it. microsandbox records this platform's manifest digest, so when the index digest does
+  not match, the plugin reads the index once to find this platform's entry. A `@sha256:` reference
+  needs no request.
+- A missing or outdated image waits for your go-ahead. In the form, Create asks first: **Create
+  workspace and download `<image>`** (or **update**), or Cancel, which creates and downloads
+  nothing. When a sandbox is recreated later, its start fails without downloading, and the Sandbox
+  panel offers **Download** or **Update `<image>`**. Retries, daemon restarts, and agent launches
+  never download.
+- When the registry can't be reached or needs credentials, a local image is used as it is, as is a
+  `localhost/` image or one built locally.
+
+Restarting an existing container or microVM, such as after a reboot, checks and downloads
+nothing.
 
 The first profile's image, `docker.io/library/node:22-bookworm-slim`, has no agent CLIs. Build one that installs them, or mount them from the host under extra mounts:
 

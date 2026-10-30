@@ -66,11 +66,16 @@ export const microsandboxBackend: SandboxBackend = {
   persistent: true,
 
   images: {
-    async exists(cli, image) {
-      return runCli(cli, ["image", "inspect", image]).then(
-        () => true,
-        () => false,
-      );
+    async localDigests(cli, image) {
+      let raw: string;
+      try {
+        raw = await runCli(cli, ["image", "inspect", image, "--format", "json"]);
+      } catch {
+        return null;
+      }
+      // This platform's manifest digest.
+      const { digest } = JSON.parse(raw) as { digest?: unknown };
+      return typeof digest === "string" ? [digest] : [];
     },
     async pull(cli, image) {
       await runCli(cli, ["pull", "--quiet", image], { long: true });

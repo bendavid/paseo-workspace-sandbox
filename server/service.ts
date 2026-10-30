@@ -10,6 +10,7 @@ import {
   type ClaudeFolderAccess,
 } from "./backends/index";
 import type { ImageStore } from "./backends/types";
+import { checkImage } from "./registry";
 import {
   containerName,
   shellQuote,
@@ -28,6 +29,7 @@ import {
   isFullImageReference,
   type ContainerProfile,
   type ContainerStatus,
+  type ImageDownload,
   type SandboxHealth,
   type SandboxRecord,
   type createSandboxedWorkspaceRpc,
@@ -100,17 +102,21 @@ function buildWorkspaceRequest(
   return { source, ...(title ? { title } : {}) };
 }
 
-/** The sandbox needs an image that is not on this machine, and nobody agreed to download it. */
-class ImageMissingError extends Error {
-  constructor(readonly image: string) {
-    super(`The image ${image} is not on this machine. Download it from the Sandbox panel.`);
-    this.name = "ImageMissingError";
+/** The sandbox needs to download its image, missing or outdated, and nobody agreed to it. */
+class ImageDownloadError extends Error {
+  constructor(readonly download: ImageDownload) {
+    super(
+      download.reason === "missing"
+        ? `The image ${download.image} is not on this machine. Download it from the Sandbox panel.`
+        : `The registry has a newer ${download.image} than this machine. Update it from the Sandbox panel.`,
+    );
+    this.name = "ImageDownloadError";
   }
 }
 
 interface StartFailure {
   message: string;
-  missingImage?: string;
+  download?: ImageDownload;
 }
 
 function describeError(error: unknown): string {
@@ -197,8 +203,8 @@ export class SandboxService {
   private async runContainer(record: SandboxRecord): Promise<void> {
     const policy = await this.policy(record.profile);
     const backend = backendFor(policy.engine);
-    // Only the Claude folder check and creating the sandbox run the image; resuming an existing
-    // container or microVM needs nothing new.
+    // The Claude folder check and creating the sandbox, retries included, run the image, so it is
+    // checked against its registry first. Restarting an existing container or microVM is not.
     const runsImage =
       record.claudeHome === "checking" ||
       (await backend.status(workspaceTarget(record, { mode: "none" }), policy)).state === "missing";
@@ -210,16 +216,21 @@ export class SandboxService {
     await backend.start(target, policy);
   }
 
-  /** Downloads the image only when it is missing and the user agreed to download exactly it. */
+  /**
+   * Makes sure the local image is the registry's current one for its tag. A missing or outdated
+   * image downloads only when the user agreed to download exactly it; one the registry can't
+   * confirm is used as it is.
+   */
   private async ensureImage(
     record: SandboxRecord,
     policy: ContainerPolicy,
     images: ImageStore,
   ): Promise<void> {
     const { image } = record.profile;
-    if (await images.exists(policy.cli, image)) return;
+    const state = await checkImage(image, await images.localDigests(policy.cli, image));
+    if (state === "current" || state === "unverified") return;
     if (this.approvedDownloads.get(record.workspaceId) !== image) {
-      throw new ImageMissingError(image);
+      throw new ImageDownloadError({ image, reason: state });
     }
     this.downloading.add(record.workspaceId);
     try {
@@ -281,7 +292,7 @@ export class SandboxService {
         const message = describeError(error);
         this.failures.set(workspaceId, {
           message,
-          ...(error instanceof ImageMissingError ? { missingImage: error.image } : {}),
+          ...(error instanceof ImageDownloadError ? { download: error.download } : {}),
         });
         const detail = error instanceof Error && error.cause ? error.cause : error;
         console.error(`Sandbox ${record.container} failed to start`, describeError(detail));
@@ -404,13 +415,14 @@ export class SandboxService {
     return { workspaceId: record.workspaceId };
   }
 
-  /** A profile's image and whether it is on this machine; null for engines without images. */
+  /** A profile's image and how it compares with its registry; null for engines without images. */
   async imageStatus(profileId: string | undefined): Promise<RpcOutput<typeof imageStatusRpc>> {
     const profile = this.containerProfiles.get(profileId);
     const { images } = backendFor(profile.engine);
-    if (!images) return { image: null, present: true };
+    if (!images) return { image: null, state: "current" };
     const policy = await this.policy(profile);
-    return { image: profile.image, present: await images.exists(policy.cli, profile.image) };
+    const local = await images.localDigests(policy.cli, profile.image);
+    return { image: profile.image, state: await checkImage(profile.image, local) };
   }
 
   /** Downloads a workspace's image, which the user named, and starts its sandbox. */
@@ -487,7 +499,7 @@ export class SandboxService {
       return {
         state: "failed",
         error: failure.message,
-        ...(failure.missingImage ? { missingImage: failure.missingImage } : {}),
+        ...(failure.download ? { download: failure.download } : {}),
       };
     }
     this.failures.delete(sandbox.workspaceId);

@@ -3,7 +3,11 @@ import type { ContainerPolicy, ContainerTarget } from "../container";
 
 /** The local image store of an engine that runs images. */
 export interface ImageStore {
-  exists(cli: string, image: string): Promise<boolean>;
+  /**
+   * The registry digests the local copy is known by (index or platform manifest), empty for an
+   * image built locally, or null when the image is not on this machine.
+   */
+  localDigests(cli: string, image: string): Promise<string[] | null>;
   /** Downloads the image. Only called after the user agreed to download that exact reference. */
   pull(cli: string, image: string): Promise<void>;
 }

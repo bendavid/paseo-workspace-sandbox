@@ -24,6 +24,7 @@ import {
   listContainerProfilesRpc,
   listRefsRpc,
   type ContainerProfile,
+  type ImageDownload,
 } from "../shared/rpc";
 import { ProfileEditor, type ProfileEditorTarget } from "./profile-editor";
 import {
@@ -123,9 +124,9 @@ function useSandboxForm(params: PluginScreenParams, openWorkspace: (workspaceId:
     mutationFn: createWorkspace,
     onSuccess: ({ workspaceId }) => openWorkspace(workspaceId),
   });
-  // A missing image downloads only after the user agrees to that exact reference.
+  // A missing or outdated image downloads only after the user agrees to that exact reference.
   const imageCheck = useMutation({ mutationFn: getImageStatus });
-  const [download, setDownload] = useState<string | null>(null);
+  const [download, setDownload] = useState<ImageDownload | null>(null);
   const request = useCallback(
     () =>
       project
@@ -143,9 +144,10 @@ function useSandboxForm(params: PluginScreenParams, openWorkspace: (workspaceId:
     const input = request();
     if (!input || create.isPending || imageCheck.isPending) return;
     imageCheck.mutate(profile ? { profileId: profile.id } : {}, {
-      onSuccess: ({ image, present }) => {
-        if (image && !present) setDownload(image);
-        else create.mutate(input);
+      onSuccess: ({ image, state }) => {
+        if (image && (state === "missing" || state === "outdated")) {
+          setDownload({ image, reason: state });
+        } else create.mutate(input);
       },
     });
   }, [create, imageCheck, profile, request]);
@@ -153,7 +155,7 @@ function useSandboxForm(params: PluginScreenParams, openWorkspace: (workspaceId:
     const input = request();
     if (!input || !download) return;
     setDownload(null);
-    create.mutate({ ...input, downloadImage: download });
+    create.mutate({ ...input, downloadImage: download.image });
   }, [create, download, request]);
   const cancelDownload = useCallback(() => setDownload(null), []);
 
@@ -306,7 +308,7 @@ function SendButton({ theme, form }: { theme: PluginTheme; form: SandboxForm }) 
   );
 }
 
-/** Asks before creating a workspace whose image is not on this machine yet. */
+/** Asks before creating a workspace whose image is missing or older than its registry's. */
 function DownloadConfirmation({ theme, form }: { theme: PluginTheme; form: SandboxForm }) {
   const { cancelDownload } = form;
   const openChange = useCallback(
@@ -354,16 +356,22 @@ function DownloadConfirmation({ theme, form }: { theme: PluginTheme; form: Sandb
       },
     };
   }, [theme]);
-  const image = form.download;
+  const { download } = form;
+  const verb = download?.reason === "outdated" ? "update" : "download";
   return (
-    <Modal title="Download image?" open={image !== null} onOpenChange={openChange}>
+    <Modal
+      title={verb === "update" ? "Update image?" : "Download image?"}
+      open={download !== null}
+      onOpenChange={openChange}
+    >
       <Modal.Content>
         <Text style={styles.text}>
-          The container profile’s image is not on this machine. Creating the workspace downloads it
-          from its registry:
+          {verb === "update"
+            ? "The registry has a newer version of the container profile’s image than this machine. Creating the workspace downloads it:"
+            : "The container profile’s image is not on this machine. Creating the workspace downloads it from its registry:"}
         </Text>
         <Text style={styles.image} selectable>
-          {image}
+          {download?.image}
         </Text>
         <Text style={styles.muted}>Cancel creates nothing and downloads nothing.</Text>
         <View style={styles.row}>
@@ -381,7 +389,9 @@ function DownloadConfirmation({ theme, form }: { theme: PluginTheme; form: Sandb
             style={styles.confirm}
             testID="sandbox-download-confirm"
           >
-            <Text style={styles.confirmLabel}>Create workspace and download {image}</Text>
+            <Text style={styles.confirmLabel}>
+              Create workspace and {verb} {download?.image}
+            </Text>
           </Pressable>
         </View>
       </Modal.Content>
