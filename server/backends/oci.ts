@@ -24,10 +24,12 @@ async function containerOptions(
   const user = userInfo();
   // As you, files the container writes keep your ownership: Podman maps your uid into its
   // namespace, Docker runs the process as your uid. Otherwise the image's default user runs.
+  // keep-id alone drops your supplementary groups, so files you reach through a group (a team's
+  // project folder, a shared file system) would be refused; keep-groups keeps them (crun only).
   let identity: string[] = [];
   if (policy.runAsHostUser) {
     identity = (await isPodman(policy.cli))
-      ? ["--userns=keep-id"]
+      ? ["--userns=keep-id", "--group-add", "keep-groups"]
       : ["--user", `${user.uid}:${user.gid}`];
   }
   const mounts = (await resolveMounts(target, policy)).flatMap((mount) => [

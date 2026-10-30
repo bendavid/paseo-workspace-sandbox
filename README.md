@@ -139,7 +139,13 @@ microsandbox; Bubblewrap always runs as you.
   and `/etc/group`, with your name, group, home, and `/bin/sh`, replacing whatever the image had
   for that uid or name, such as the Node images' `node` account for uid 1000. Tools that read the
   account instead of `HOME`, such as OpenSSH looking for `~/.ssh`, then agree with `HOME`. Files
-  written to mounts belong to you.
+  written to mounts belong to you. Podman also gets `--group-add keep-groups`, which keeps your
+  supplementary groups, so files you reach through a group, such as a team's project folder or a
+  shared file system, stay reachable; inside, those groups show as `nogroup`. It needs the `crun`
+  runtime and rules out other `--group-add` options; for another runtime, or your own groups, turn
+  this setting off and pass `--userns`, `--user`, and `--group-add` under extra run arguments.
+  Docker keeps only your primary group; add others with `--group-add <gid>`. microsandbox's guest
+  checks permissions with your primary group only.
 - **Off:** commands run as the image's default user, often root, with its own home and dotfiles.
   The provider folders are still mounted at their host paths, and linked from the image user's
   home (`~/.codex` and so on) so agents find them. Files written to mounts belong to whoever that

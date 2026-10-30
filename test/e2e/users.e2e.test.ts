@@ -3,7 +3,7 @@
 // never downloaded: an engine without IMAGE is skipped.
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -91,6 +91,15 @@ describe.each(ENGINES)("the user in a %s sandbox", (engine) => {
       );
       const user = userInfo();
       const group = (await run("id", ["-gn"])).stdout.trim();
+      if (runAsHostUser && engine === "podman") {
+        // Your supplementary groups too, as the kernel sees the container's process.
+        const pid = (
+          await runCli(cli!, ["inspect", "--format", "{{.State.Pid}}", target.container])
+        ).trim();
+        const status = await readFile(`/proc/${pid}/status`, "utf8");
+        const groups = /^Groups:(.*)$/m.exec(status)?.[1]?.trim().split(/\s+/).map(Number) ?? [];
+        expect(groups.toSorted()).toEqual([...new Set(process.getgroups?.() ?? [])].toSorted());
+      }
       if (runAsHostUser) {
         expect(report).toMatchObject({
           uid: String(user.uid),
