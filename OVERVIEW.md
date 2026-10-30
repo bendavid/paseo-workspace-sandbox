@@ -42,4 +42,4 @@ The plugin covers what Paseo's plugin API reaches. These still run on the host:
 - Git commands the daemon runs in the workspace, and title, branch and commit message generation.
 - OpenCode and providers registered by plugins, which the plugin refuses to start in a sandboxed workspace.
 
-Model lists and version checks for sandboxed providers come from the host's CLI, so images should carry the same agent versions as the host. A sandbox in the project directory applies to new agents started anywhere in that directory, from any of the project's workspaces, until you archive it.
+Model lists and version checks for sandboxed providers come from the host's CLI, so images should carry the same agent versions as the host. A sandboxed workspace in the project directory shares it with the project's other workspaces; their agents run on the host but are labelled as sandboxed and have Paseo tools disabled.

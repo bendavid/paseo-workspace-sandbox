@@ -282,10 +282,21 @@ client does not stop the process inside, so the wrapper records the inner pid an
 
 **Sandboxed directory** is the sandboxed counterpart of New workspace's "Local": a new workspace on
 the project directory, titled `<project> (sandboxed)` unless you name it. Projects that are not Git
-repositories always get one. The `agent.create` hook sees only an agent's directory, not its
-workspace, so new agents started anywhere in that directory, from any of the project's workspaces,
-run in the sandbox. Agents that were already running there keep their host provider. Archiving the
-sandboxed workspace ends this.
+repositories always get one.
+
+The project's other workspaces share that directory. Each agent runs where its own workspace says:
+in its workspace's sandbox, or on the host when its workspace has none. Two sandboxed workspaces on
+one directory each use their own sandbox. The `agent.create` hook only sees an agent's directory,
+not its workspace, so a new agent of an unsandboxed workspace in that directory still gets the
+sandboxed provider, and the session hook, which does see the workspace, runs it on the host. Such an
+agent is labelled as sandboxed (for example "Claude Code (sandboxed)"), has Paseo tools disabled,
+and for ACP providers keeps Paseo's terminal and file access off. Agents that were already running
+there keep their host provider.
+
+When the daemon passes no workspace (agents saved without one, or a session resumed through the
+SDK's `resumeAgent`), the directory decides and the agent stays sandboxed. An agent whose workspace had a sandbox that is
+gone shows its history but does not run again; the plugin remembers removed sandboxes in
+`state.json` for this.
 
 ## Not sandboxed
 
@@ -309,8 +320,9 @@ cannot run outside one; both fail with an explanation.
 - A terminal creation hook, so Paseo's own terminals, scripts, and setup could run in the sandbox.
 - A provider launch hook, so sandboxing a provider would not need a visible derived profile, and the
   requested provider would not have to be available on the host.
-- `agent.create` hooks that receive the agent's workspace, so a sandbox could be limited to one of
-  several workspaces sharing a directory.
+- `agent.create` hooks that receive the agent's workspace, so agents of unsandboxed workspaces
+  sharing a sandbox's directory would keep their own provider, instead of running on the host with
+  the sandboxed provider's label and restrictions.
 - `before("workspace.create")` with the workspace ID the daemon allocates, so Paseo's own New
   workspace form could create sandboxed workspaces.
 - A slot in the New workspace form, or access to the app's composer and combobox, instead of a

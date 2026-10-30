@@ -62,9 +62,10 @@ spec=$state_dir/workspaces/$workspace_id.sh
 if [ -z "$workspace_id" ] || [ ! -f "$spec" ]; then
   # Only the plugin opens sandboxed terminals, and only in sandboxed workspaces.
   [ "$mode" = terminal ] && fail "workspace \${workspace_id:-?} is not sandboxed"
-  # Every agent session carries PASEO_AGENT_ID, and a session never falls back to the host. Runs
-  # without a session (model discovery, version checks) and history the plugin routes here (agents
-  # whose sandbox is gone) run the host's CLI, which is assumed to match the sandboxes'.
+  # Every agent session carries PASEO_AGENT_ID and only runs on the host when the plugin routes it
+  # there: history of agents whose sandbox is gone, and agents of an unsandboxed workspace that
+  # shares a sandbox's directory. Runs without a session (model discovery, version checks) use the
+  # host's CLI, which is assumed to match the sandboxes'.
   if [ -n "\${PASEO_AGENT_ID:-}" ] && [ "\${PASEO_SANDBOX_ROUTE:-}" != host ]; then
     fail "agent $PASEO_AGENT_ID is not in a sandboxed workspace"
   fi

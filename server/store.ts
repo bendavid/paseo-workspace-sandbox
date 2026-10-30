@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -9,6 +10,8 @@ const StateFileSchema = z.object({
   sandboxes: z.array(SandboxRecordSchema),
   // Sandboxed provider profile ID -> the provider it was derived from.
   profiles: z.record(z.string(), z.string()).default({}),
+  // Workspaces whose sandbox was removed, so their sandboxed agents never fall back to the host.
+  retired: z.array(z.string()).default([]),
 });
 
 // $PASEO_HOME/plugin-data/<plugin id>/ is where Paseo plugins keep their own data; Paseo never
@@ -40,6 +43,7 @@ function isWithin(root: string, candidate: string): boolean {
 export class SandboxStore {
   private readonly records = new Map<string, SandboxRecord>();
   private readonly profiles = new Map<string, string>();
+  private readonly retired = new Set<string>();
   private readonly file: string;
 
   constructor(readonly directory: string) {
@@ -59,6 +63,8 @@ export class SandboxStore {
     for (const record of state.sandboxes) this.records.set(record.workspaceId, record);
     this.profiles.clear();
     for (const [profile, base] of Object.entries(state.profiles)) this.profiles.set(profile, base);
+    this.retired.clear();
+    for (const workspaceId of state.retired) this.retired.add(workspaceId);
   }
 
   list(): SandboxRecord[] {
@@ -88,10 +94,21 @@ export class SandboxStore {
     const record = this.records.get(workspaceId) ?? null;
     if (!record) return null;
     this.records.delete(workspaceId);
+    // A pending record's workspace was never created.
+    if (!record.pending) this.retired.add(workspaceId);
     await this.save();
     await rm(this.specFile(workspaceId), { force: true });
     await rm(environmentFile(this.specFile(workspaceId)), { force: true });
     return record;
+  }
+
+  /**
+   * Whether the workspace had a sandbox that is gone, such as an archived workspace. Its private
+   * Claude folder outlives the sandbox and counts too, for sandboxes removed before the plugin
+   * recorded removals.
+   */
+  wasSandboxed(workspaceId: string): boolean {
+    return this.retired.has(workspaceId) || existsSync(this.claudeHomeDir(workspaceId));
   }
 
   /** The provider a sandboxed profile was derived from, or null when the plugin does not own it. */
@@ -127,6 +144,7 @@ export class SandboxStore {
       version: 1 as const,
       sandboxes: this.list(),
       profiles: Object.fromEntries(this.profiles),
+      retired: [...this.retired],
     };
     await writeFileAtomic(this.file, `${JSON.stringify(state, null, 2)}\n`);
   }
