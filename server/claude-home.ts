@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { SHARED_CLAUDE_ENTRIES } from "./container";
@@ -34,13 +34,6 @@ async function isDirectory(file: string): Promise<boolean> {
 }
 
 /**
- * The container engine mounts the shared entries inside a workspace's Claude folder. On NFS it may
- * not act as you, and then needs group search permission on that folder. Its parents stay 0700,
- * so nobody else reaches it.
- */
-const FOLDER_MODE = 0o710;
-
-/**
  * Creates or updates a workspace's private Claude config folder.
  *
  * - `.claude.json` is copied once, without its map of every project, so onboarding is done.
@@ -55,10 +48,7 @@ export async function prepareClaudeHome(input: {
   helperCommand: string;
 }): Promise<void> {
   const { directory, hostConfigDir } = input;
-  await mkdir(path.dirname(directory), { recursive: true, mode: 0o700 });
-  await mkdir(directory, { recursive: true });
-  // Also fixes folders created before with another mode.
-  await chmod(directory, FOLDER_MODE);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
 
   const claudeJson = path.join(directory, ".claude.json");
   if (!existsSync(claudeJson)) {

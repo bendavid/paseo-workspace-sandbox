@@ -27,22 +27,12 @@ async function setup() {
   return { homes, directory, prepare };
 }
 
-test("a new Claude folder is 0710 inside 0700 parents", async () => {
+test("a new Claude folder and its parents are private", async () => {
   const { homes, directory, prepare } = await setup();
   await prepare();
-  // The engine reaches the shared entries' mount points on NFS; nobody else reaches the folder.
-  expect(await mode(directory)).toBe(0o710);
+  expect(await mode(directory)).toBe(0o700);
   expect(await mode(path.dirname(directory))).toBe(0o700);
   expect(await mode(homes)).toBe(0o700);
   expect(await mode(path.join(directory, ".claude.json"))).toBe(0o600);
   expect(await mode(path.join(directory, "settings.json"))).toBe(0o600);
-});
-
-test("an existing Claude folder becomes 0710 and its parents keep their mode", async () => {
-  const { homes, directory, prepare } = await setup();
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await prepare();
-  expect(await mode(directory)).toBe(0o710);
-  expect(await mode(path.dirname(directory))).toBe(0o700);
-  expect(await mode(homes)).toBe(0o700);
 });
