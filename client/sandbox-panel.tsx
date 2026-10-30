@@ -11,12 +11,13 @@ import {
 import { useCallback, useMemo } from "react";
 import { Text } from "react-native";
 import {
+  chooseImageRpc,
   describeProfile,
-  downloadImageRpc,
   openSandboxShellRpc,
   sandboxStatusRpc,
   type ClaudeLogin,
   type ContainerStatus,
+  type ImageChoice,
   type ImageDownload,
 } from "../shared/rpc";
 
@@ -62,20 +63,24 @@ function startErrors(container: ContainerStatus, login: ClaudeLogin | null): str
   return errors;
 }
 
-/** The user's go-ahead for the download a sandbox waits for, naming the exact image. */
+/**
+ * The user's answer for the download a sandbox waits for, naming the exact image: download it, or
+ * for an outdated image, use the local copy.
+ */
 function ImageDownloadAction({
   download,
-  onDownload,
+  onChoose,
   pending,
   error,
 }: {
   download: ImageDownload;
-  onDownload(image: string): void;
+  onChoose(choice: ImageChoice): void;
   pending: boolean;
   error: string | null;
 }) {
   const { image, reason } = download;
-  const start = useCallback(() => onDownload(image), [image, onDownload]);
+  const fetchImage = useCallback(() => onChoose({ image, action: "download" }), [image, onChoose]);
+  const keepLocal = useCallback(() => onChoose({ image, action: "local" }), [image, onChoose]);
   return (
     <SettingsCard>
       <SettingsAction
@@ -86,10 +91,19 @@ function ImageDownloadAction({
             : `From its registry: ${image}`
         }
         actionLabel={`${reason === "outdated" ? "Update" : "Download"} ${image}`}
-        onPress={start}
+        onPress={fetchImage}
         disabled={pending}
         error={error}
       />
+      {reason === "outdated" ? (
+        <SettingsAction
+          label="Use the local image"
+          hint="Creates the sandbox from the image already on this machine"
+          actionLabel="Use the local image"
+          onPress={keepLocal}
+          disabled={pending}
+        />
+      ) : null}
     </SettingsCard>
   );
 }
@@ -105,13 +119,13 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
   const shell = useMutation({ mutationFn: openShell });
   const open = useCallback(() => shell.mutate({ workspaceId }), [shell, workspaceId]);
   const queryClient = useQueryClient();
-  const requestDownload = useRpc(downloadImageRpc);
+  const sendImageChoice = useRpc(chooseImageRpc);
   const download = useMutation({
-    mutationFn: requestDownload,
+    mutationFn: sendImageChoice,
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["status", workspaceId] }),
   });
-  const startDownload = useCallback(
-    (image: string) => download.mutate({ workspaceId, image }),
+  const chooseImage = useCallback(
+    (choice: ImageChoice) => download.mutate({ workspaceId, ...choice }),
     [download, workspaceId],
   );
   const styles = useMemo(
@@ -154,7 +168,7 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
       {container.state === "failed" && container.download ? (
         <ImageDownloadAction
           download={container.download}
-          onDownload={startDownload}
+          onChoose={chooseImage}
           pending={download.isPending}
           error={download.error?.message ?? null}
         />

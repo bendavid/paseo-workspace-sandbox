@@ -29,6 +29,7 @@ import {
   isFullImageReference,
   type ContainerProfile,
   type ContainerStatus,
+  type ImageChoice,
   type ImageDownload,
   type SandboxHealth,
   type SandboxRecord,
@@ -108,7 +109,7 @@ class ImageDownloadError extends Error {
     super(
       download.reason === "missing"
         ? `The image ${download.image} is not on this machine. Download it from the Sandbox panel.`
-        : `The registry has a newer ${download.image} than this machine. Update it from the Sandbox panel.`,
+        : `The registry has a newer ${download.image} than this machine. Update it or use the local image from the Sandbox panel.`,
     );
     this.name = "ImageDownloadError";
   }
@@ -128,11 +129,11 @@ export class SandboxService {
   private readonly starting = new Map<string, Promise<string | null>>();
   private readonly failures = new Map<string, StartFailure>();
   /**
-   * The image the user agreed to download, by workspace ID: from the form at creation, or the
-   * panel's Download button. It covers the next start attempt only and is never stored, so retries,
-   * restarts, and recreated containers download nothing.
+   * The user's answer for an image that needs downloading, by workspace ID: from the form at
+   * creation, or the Sandbox panel. It covers the next start attempt only and is never stored, so
+   * retries, restarts, and recreated containers download nothing and ask again.
    */
-  private readonly approvedDownloads = new Map<string, string>();
+  private readonly imageChoices = new Map<string, ImageChoice>();
   /** Workspaces whose image is downloading. */
   private readonly downloading = new Set<string>();
   /** Workspaces this process is creating; their pending records are not leftovers. */
@@ -218,8 +219,8 @@ export class SandboxService {
 
   /**
    * Makes sure the local image is the registry's current one for its tag. A missing or outdated
-   * image downloads only when the user agreed to download exactly it; one the registry can't
-   * confirm is used as it is.
+   * image downloads only when the user agreed to download exactly it, and an outdated one is used
+   * as it is when the user chose so; one the registry can't confirm is used as it is.
    */
   private async ensureImage(
     record: SandboxRecord,
@@ -229,7 +230,9 @@ export class SandboxService {
     const { image } = record.profile;
     const state = await checkImage(image, await images.localDigests(policy.cli, image));
     if (state === "current" || state === "unverified") return;
-    if (this.approvedDownloads.get(record.workspaceId) !== image) {
+    const choice = this.imageChoices.get(record.workspaceId);
+    if (choice?.image === image && choice.action === "local" && state === "outdated") return;
+    if (choice?.image !== image || choice.action !== "download") {
       throw new ImageDownloadError({ image, reason: state });
     }
     this.downloading.add(record.workspaceId);
@@ -300,7 +303,7 @@ export class SandboxService {
       })
       .finally(() => {
         this.starting.delete(workspaceId);
-        this.approvedDownloads.delete(workspaceId);
+        this.imageChoices.delete(workspaceId);
       });
     this.starting.set(workspaceId, task);
     return task;
@@ -357,9 +360,9 @@ export class SandboxService {
     if (engineUsesImage(policy.engine) && !isFullImageReference(profile.image)) {
       throw new Error(`${IMAGE_REFERENCE_HINT}, in the container profile "${profile.name}"`);
     }
-    if (input.downloadImage !== undefined && input.downloadImage !== profile.image) {
+    if (input.imageChoice && input.imageChoice.image !== profile.image) {
       throw new Error(
-        `The image to download, ${input.downloadImage}, is not the profile's (${profile.image})`,
+        `The image ${input.imageChoice.image} is not the profile's (${profile.image})`,
       );
     }
     return { profile, project, isolation, policy };
@@ -409,7 +412,7 @@ export class SandboxService {
   ): Promise<RpcOutput<typeof createSandboxedWorkspaceRpc>> {
     const plan = await this.planCreation(input, paseo);
     const record = await this.createRegistered(input, plan, paseo);
-    if (input.downloadImage) this.approvedDownloads.set(record.workspaceId, input.downloadImage);
+    if (input.imageChoice) this.imageChoices.set(record.workspaceId, input.imageChoice);
     // The workspace opens at once; agents and terminals wait for the sandbox when they launch.
     void this.ensureRunning(record.workspaceId);
     return { workspaceId: record.workspaceId };
@@ -425,16 +428,16 @@ export class SandboxService {
     return { image: profile.image, state: await checkImage(profile.image, local) };
   }
 
-  /** Downloads a workspace's image, which the user named, and starts its sandbox. */
-  async downloadImage(workspaceId: string, image: string): Promise<void> {
+  /** Starts a sandbox with the user's answer for its image, which names the sandbox's image. */
+  async chooseImage(workspaceId: string, choice: ImageChoice): Promise<void> {
     const record = this.store.get(workspaceId);
     if (!record) throw new Error("This workspace is not sandboxed");
-    if (image !== record.profile.image) {
-      throw new Error(`The image to download, ${image}, is not the sandbox's`);
+    if (choice.image !== record.profile.image) {
+      throw new Error(`The image ${choice.image} is not the sandbox's`);
     }
-    // Let a running attempt finish, so the approval belongs to a fresh one.
+    // Let a running attempt finish, so the choice belongs to a fresh one.
     await this.starting.get(workspaceId);
-    this.approvedDownloads.set(workspaceId, image);
+    this.imageChoices.set(workspaceId, choice);
     // A download outlasts an RPC; the status reports its progress.
     void this.ensureRunning(workspaceId);
   }

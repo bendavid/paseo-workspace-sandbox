@@ -24,6 +24,7 @@ import {
   listContainerProfilesRpc,
   listRefsRpc,
   type ContainerProfile,
+  type ImageChoice,
   type ImageDownload,
 } from "../shared/rpc";
 import { ProfileEditor, type ProfileEditorTarget } from "./profile-editor";
@@ -151,12 +152,17 @@ function useSandboxForm(params: PluginScreenParams, openWorkspace: (workspaceId:
       },
     });
   }, [create, imageCheck, profile, request]);
-  const confirmDownload = useCallback(() => {
-    const input = request();
-    if (!input || !download) return;
-    setDownload(null);
-    create.mutate({ ...input, downloadImage: download.image });
-  }, [create, download, request]);
+  const chooseImage = useCallback(
+    (action: ImageChoice["action"]) => {
+      const input = request();
+      if (!input || !download) return;
+      setDownload(null);
+      create.mutate({ ...input, imageChoice: { image: download.image, action } });
+    },
+    [create, download, request],
+  );
+  const confirmDownload = useCallback(() => chooseImage("download"), [chooseImage]);
+  const useLocalImage = useCallback(() => chooseImage("local"), [chooseImage]);
   const cancelDownload = useCallback(() => setDownload(null), []);
 
   return {
@@ -165,6 +171,7 @@ function useSandboxForm(params: PluginScreenParams, openWorkspace: (workspaceId:
     pending: create.isPending || imageCheck.isPending,
     download,
     confirmDownload,
+    useLocalImage,
     cancelDownload,
     refs: refs.data ?? { current: null, refs: [] },
     project,
@@ -367,7 +374,7 @@ function DownloadConfirmation({ theme, form }: { theme: PluginTheme; form: Sandb
       <Modal.Content>
         <Text style={styles.text}>
           {verb === "update"
-            ? "The registry has a newer version of the container profile’s image than this machine. Creating the workspace downloads it:"
+            ? "The registry has a newer version of the container profile’s image than this machine. Update it, or create the workspace with the image already here:"
             : "The container profile’s image is not on this machine. Creating the workspace downloads it from its registry:"}
         </Text>
         <Text style={styles.image} selectable>
@@ -383,6 +390,16 @@ function DownloadConfirmation({ theme, form }: { theme: PluginTheme; form: Sandb
           >
             <Text style={styles.cancelLabel}>Cancel</Text>
           </Pressable>
+          {verb === "update" ? (
+            <Pressable
+              accessibilityRole="button"
+              onPress={form.useLocalImage}
+              style={styles.cancel}
+              testID="sandbox-download-local"
+            >
+              <Text style={styles.cancelLabel}>Create workspace with the local image</Text>
+            </Pressable>
+          ) : null}
           <Pressable
             accessibilityRole="button"
             onPress={form.confirmDownload}

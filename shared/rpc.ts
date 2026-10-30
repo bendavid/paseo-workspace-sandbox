@@ -111,6 +111,17 @@ export const ImageDownloadSchema = z.object({
 
 export type ImageDownload = z.infer<typeof ImageDownloadSchema>;
 
+/**
+ * The user's answer for an image that needs downloading: `download` it, or for an outdated image,
+ * use the `local` copy as it is. It names the image, so it can't apply to another.
+ */
+export const ImageChoiceSchema = z.object({
+  image: z.string().min(1),
+  action: z.enum(["download", "local"]),
+});
+
+export type ImageChoice = z.infer<typeof ImageChoiceSchema>;
+
 export const ContainerStatusSchema = z.discriminatedUnion("state", [
   /** `downloading` names the image being pulled. */
   z.object({ state: z.literal("starting"), downloading: z.string().optional() }),
@@ -143,10 +154,10 @@ export const createSandboxedWorkspaceRpc = defineRpc({
     baseRef: z.string().trim().min(1).optional(),
     title: z.string().trim().min(1).optional(),
     /**
-     * The profile's image, when the user agreed to download it if it is missing or outdated.
-     * Without it, nothing is downloaded and such an image fails the sandbox's start.
+     * What to do when the profile's image is missing or outdated. Without it, nothing is
+     * downloaded and such an image fails the sandbox's start.
      */
-    downloadImage: z.string().min(1).optional(),
+    imageChoice: ImageChoiceSchema.optional(),
   }),
   /** Returns as soon as the workspace exists; the sandbox is ready when its status says so. */
   output: z.object({ workspaceId: z.string() }),
@@ -258,9 +269,12 @@ export const imageStatusRpc = defineRpc({
   }),
 });
 
-/** Downloads a workspace's image, which the user named, and starts its sandbox. */
-export const downloadImageRpc = defineRpc({
-  name: "sandbox.image.download",
-  input: z.object({ workspaceId: z.string(), image: z.string().min(1) }),
+/**
+ * Starts a sandbox whose image needs downloading: downloads the image the user named, or uses the
+ * local copy of an outdated one.
+ */
+export const chooseImageRpc = defineRpc({
+  name: "sandbox.image.choose",
+  input: ImageChoiceSchema.extend({ workspaceId: z.string() }),
   output: z.object({}),
 });

@@ -9,9 +9,9 @@ import { SandboxStore, resolveDataDirectory } from "./server/store";
 import { listTerminalProfiles } from "./server/terminals";
 import { writeWrapper } from "./server/wrapper";
 import {
+  chooseImageRpc,
   createSandboxedWorkspaceRpc,
   deleteContainerProfileRpc,
-  downloadImageRpc,
   imageStatusRpc,
   listContainerProfilesRpc,
   listRefsRpc,
@@ -87,8 +87,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(imageStatusRpc, async ({ profileId }, { paseo }) =>
     (await resolve(paseo)).imageStatus(profileId),
   );
-  server.handle(downloadImageRpc, async ({ workspaceId, image }, { paseo }) => {
-    await (await resolve(paseo)).downloadImage(workspaceId, image);
+  server.handle(chooseImageRpc, async ({ workspaceId, ...choice }, { paseo }) => {
+    await (await resolve(paseo)).chooseImage(workspaceId, choice);
     return {};
   });
   server.handle(openSandboxShellRpc, async (input, { paseo }) =>

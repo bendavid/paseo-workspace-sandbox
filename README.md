@@ -120,10 +120,12 @@ container or microVM (retries included), it compares the local copy with the reg
   not match, the plugin reads the index once to find this platform's entry. A `@sha256:` reference
   needs no request.
 - A missing or outdated image waits for your go-ahead. In the form, Create asks first: **Create
-  workspace and download `<image>`** (or **update**), or Cancel, which creates and downloads
-  nothing. When a sandbox is recreated later, its start fails without downloading, and the Sandbox
-  panel offers **Download** or **Update `<image>`**. Retries, daemon restarts, and agent launches
-  never download.
+  workspace and download `<image>`** (or **update**), for an outdated image **Create workspace with
+  the local image**, or Cancel, which creates and downloads nothing. When a sandbox is recreated
+  later, its start fails without downloading, and the Sandbox panel offers **Download** or
+  **Update `<image>`**, and **Use the local image** for an outdated one. Each answer covers that
+  one start and is never stored, so retries, daemon restarts, and agent launches never download
+  and a later recreation asks again.
 - When the registry can't be reached or needs credentials, a local image is used as it is, as is a
   `localhost/` image or one built locally.
 
