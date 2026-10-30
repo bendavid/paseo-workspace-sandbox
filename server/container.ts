@@ -15,6 +15,8 @@ export interface ContainerPolicy {
   extraRunArgs: string;
   /** Your uid, gid, and home inside, or the image's default user and home. */
   runAsHostUser: boolean;
+  /** Mount the agents' own folders; see shareAgentState in the profile. */
+  shareAgentState: boolean;
 }
 
 export interface Mount {
@@ -284,7 +286,10 @@ export async function resolveMounts(
     ? await linkedDirectoryMounts(target.workspace, target.linkedDirectory)
     : await workspaceMounts(target.workspace);
   mounts.push(...claudeMounts(target.claude));
-  for (const directory of providerDirectories()) mounts.push({ path: directory, readOnly: false });
+  if (policy.shareAgentState) {
+    for (const directory of providerDirectories())
+      mounts.push({ path: directory, readOnly: false });
+  }
   for (const mount of extra) {
     if (!existsSync(mount.path)) throw new Error(`Extra mount ${mount.path} does not exist`);
   }

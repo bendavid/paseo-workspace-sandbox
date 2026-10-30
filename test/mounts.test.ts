@@ -8,6 +8,7 @@ import {
   createLink,
   linkMountPoints,
   parseExtraMounts,
+  providerDirectories,
   removeLink,
   resolveMounts,
   type ContainerPolicy,
@@ -29,6 +30,7 @@ function policy(extraMounts: string): ContainerPolicy {
     extraMounts,
     extraRunArgs: "",
     runAsHostUser: true,
+    shareAgentState: true,
   };
 }
 
@@ -161,4 +163,23 @@ test("a worktree keeps the other worktrees' entries read-only and its own writab
     { path: path.join(gitDir, "config"), readOnly: true },
     { path: path.join(gitDir, "worktrees", "wt"), readOnly: false },
   ]);
+});
+
+test("shares the agents' folders only when the profile does", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "sandbox-agents-"));
+  roots.push(root);
+  const target = {
+    container: "test",
+    label: "workspace=test",
+    image: "",
+    workspace: root,
+    workdir: root,
+    claude: { mode: "none" as const },
+  };
+  const agentFolders = (mounts: Array<{ path: string }>) =>
+    mounts.map((mount) => mount.path).filter((p) => providerDirectories().includes(p));
+  const shared = await resolveMounts(target, policy(""));
+  expect(agentFolders(shared)).toEqual(providerDirectories());
+  const unshared = await resolveMounts(target, { ...policy(""), shareAgentState: false });
+  expect(agentFolders(unshared)).toEqual([]);
 });

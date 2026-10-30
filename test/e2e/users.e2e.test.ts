@@ -57,9 +57,10 @@ function exec(engine: Engine, cli: string, container: string): Promise<string> {
 describe.each(ENGINES)("the user in a %s sandbox", (engine) => {
   const cli = clis[engine];
   test.skipIf(!cli).each([
-    ["as you", true],
-    ["as the image's default user", false],
-  ])("runs %s", async (_label, runAsHostUser) => {
+    ["as you", true, true],
+    ["as the image's default user", false, true],
+    ["as the image's default user, sharing no agent state", false, false],
+  ])("runs %s", async (_label, runAsHostUser, shareAgentState) => {
     const root = await mkdtemp(path.join(tmpdir(), "sandbox-users-e2e-"));
     roots.push(root);
     const target: ContainerTarget = {
@@ -77,6 +78,7 @@ describe.each(ENGINES)("the user in a %s sandbox", (engine) => {
       extraMounts: "",
       extraRunArgs: "",
       runAsHostUser,
+      shareAgentState,
     };
     const backend = backendFor(engine);
     try {
@@ -102,7 +104,7 @@ describe.each(ENGINES)("the user in a %s sandbox", (engine) => {
         // The node image's default user is root, with /root as its home.
         expect(report).toMatchObject({ uid: "0", whoami: "root", home: "/root", safe: "*" });
         const codex = providerDirectories().find((directory) => directory.endsWith("/.codex"));
-        if (codex) expect(report.codex).toBe(codex);
+        if (codex) expect(report.codex).toBe(shareAgentState ? codex : "");
       }
     } finally {
       await backend.remove(target, policy).catch(() => undefined);

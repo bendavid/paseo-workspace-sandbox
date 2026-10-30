@@ -85,6 +85,7 @@ const BLANK: Omit<ContainerProfile, "id"> = {
   extraMounts: "",
   extraRunArgs: "",
   runAsHostUser: true,
+  shareAgentState: true,
 };
 
 export type ProfileEditorTarget =
@@ -111,6 +112,7 @@ function fields(profile: ContainerProfile): Draft {
     extraMounts: profile.extraMounts,
     extraRunArgs: profile.extraRunArgs,
     runAsHostUser: profile.runAsHostUser !== false,
+    shareAgentState: profile.shareAgentState !== false,
   };
 }
 
@@ -230,6 +232,17 @@ function EditorForm({
             disabled={busy}
           />
         ) : null}
+        <SettingsSwitch
+          label="Share agent sign-ins and history"
+          hint={
+            draft.shareAgentState !== false
+              ? "Mounts ~/.codex and the other agents' folders, and gives Claude a private folder signed in with your host login"
+              : "Agents start signed out unless the image or an extra mount provides credentials, and Paseo may not show their history"
+          }
+          value={draft.shareAgentState !== false}
+          onValueChange={field("shareAgentState")}
+          disabled={busy}
+        />
         {engineHasUserChoice(engine) ? (
           <SettingsSwitch
             label="Run as host user"

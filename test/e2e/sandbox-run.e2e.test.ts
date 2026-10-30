@@ -50,6 +50,7 @@ describe.each(ENGINES)("sandbox-run with %s", (engine) => {
       extraMounts: "",
       extraRunArgs: "",
       runAsHostUser: true,
+      shareAgentState: true,
     };
     const wrapper = await writeWrapper(state);
     const specFile = path.join(state, "workspaces", "wks_e2e.sh");

@@ -147,7 +147,7 @@ export class SandboxService {
   ) {}
 
   private claudeHome(record: SandboxRecord): ClaudeHome {
-    if (record.claudeHome === "checking") return { mode: "none" };
+    if (record.claudeHome === "checking" || record.claudeHome === "none") return { mode: "none" };
     if (record.claudeHome === "shared") {
       return { mode: "shared", configDir: this.login.hostConfigDir };
     }
@@ -182,6 +182,7 @@ export class SandboxService {
       extraRunArgs: profile.extraRunArgs,
       // Engines without the choice always run as you; profiles from before the setting do too.
       runAsHostUser: !engineHasUserChoice(profile.engine) || profile.runAsHostUser !== false,
+      shareAgentState: profile.shareAgentState !== false,
     };
   }
 
@@ -392,7 +393,8 @@ export class SandboxService {
       createdAt: new Date().toISOString(),
       profile: plan.profile,
       pending: true,
-      claudeHome: "checking",
+      // Without shared agent state there is no Claude folder to decide on.
+      claudeHome: plan.profile.shareAgentState === false ? "none" : "checking",
       ...(directory ? { linkedDirectory: plan.project.projectRootPath } : {}),
     };
     this.creating.add(workspaceId);

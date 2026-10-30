@@ -23,7 +23,9 @@ The plugin needs Paseo 0.13.0 or later. It has been tested on Linux.
 
 ## Claude Code sign-in
 
-Each sandbox gets its own Claude Code config folder, so its agents can't read or change another workspace's transcripts. It starts with your `CLAUDE.md`, agents, commands, skills, output styles and plugins, read-only, and your `settings.json`.
+This section and the agents' own folders depend on the profile's **Share agent sign-ins and history** setting, on by default. Turned off, the sandbox gets none of it: agents start signed out unless the image, an extra folder or a forwarded API key provides credentials, and Paseo may not show their history.
+
+With the setting on, each sandbox gets its own Claude Code config folder, so its agents can't read or change another workspace's transcripts. It starts with your `CLAUDE.md`, agents, commands, skills, output styles and plugins, read-only, and your `settings.json`.
 
 Sandboxes never receive your refresh token, which would sign you out on the host when a sandbox used it. The plugin copies only your current access token into its data folder, readable only by you, and Claude Code in the sandbox reads it through `apiKeyHelper`. Shortly before the token expires, the plugin runs `claude auth status` on the host, which refreshes it through Claude Code's own login. A `/logout` on the host stops sandboxed Claude agents, and the header button asks you to sign in again. If a profile already mounts your Claude folder read-write, the sandbox uses it directly. On macOS Claude Code keeps its login in the Keychain, which the plugin does not read; set `CLAUDE_CODE_OAUTH_TOKEN` instead.
 
@@ -31,7 +33,7 @@ Sandboxes never receive your refresh token, which would sign you out on the host
 
 - The first time each provider runs in a sandbox, the plugin adds a `<provider>-sandbox` provider profile to the daemon's `config.json`. Profiles stay after the plugin is removed, and sandboxed agents fail rather than resume on the host until you delete them.
 - Its state, the private Claude folders, the token copy and the `sandbox-run` launcher live in `plugin-data/workspace-sandbox` in your Paseo home.
-- While deciding whether a sandbox can use your Claude folder, it briefly creates and deletes a file there.
+- For profiles that share agent sign-ins and history, deciding whether a sandbox can use your Claude folder briefly creates and deletes a file there.
 
 Agents send prompts and tool results to their providers as usual; the sandbox limits what they can reach on your machine, not what they send.
 

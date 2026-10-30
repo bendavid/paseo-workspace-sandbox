@@ -111,7 +111,9 @@ Each sandbox mounts, at the same absolute paths:
 | The workspace's own Claude folder           | read-write | See [Claude Code sign-in](#claude-code-sign-in)       |
 | `~/.codex`, `~/.copilot`, `~/.pi`, `~/.omp` | read-write | Credentials, and history the daemon reads on the host |
 
-The `.git` rows apply to sandboxed worktrees. The repository's other worktrees are not mounted, so
+The Claude folder and provider rows apply when the profile's **Share agent sign-ins and history**
+setting is on, the default; see [Claude Code sign-in](#claude-code-sign-in). The `.git` rows apply
+to sandboxed worktrees. The repository's other worktrees are not mounted, so
 git in the sandbox sees them as missing, and `git worktree prune` there would remove them on the
 host too. Their entries stay read-only, so pruning them fails, as does `git worktree add`, and
 `git worktree repair` can only change this worktree's own entry; committing and switching branches
@@ -206,7 +208,17 @@ the shell would be slower, and anything the dotfiles print would reach the agent
 
 ## Claude Code sign-in
 
-Each new sandbox gets its own Claude config folder, `homes/<workspace id>/claude` in the plugin's
+Everything in this section, and the provider folders' mounts, depends on the profile's **Share
+agent sign-ins and history** setting, on by default for every engine. Turned off, the sandbox gets
+no Claude folder of the plugin's, no copy of your access token or `apiKeyHelper`, no shared Claude
+entries or plugins, no `~/.codex`, `~/.copilot`, `~/.pi`, or `~/.omp`, and no links to them; the
+plugin runs no Claude folder check for it, and the session hook sets no `CLAUDE_CONFIG_DIR`. Agents
+then start signed out unless the image, an extra mount, or a forwarded variable such as
+`ANTHROPIC_API_KEY` provides credentials, and they keep their sessions inside the sandbox, where
+Paseo may not find them to show history or resume. The host login is only refreshed while some
+sandbox uses a private Claude folder.
+
+With the setting on, each new sandbox gets its own Claude config folder, `homes/<workspace id>/claude` in the plugin's
 data folder, mounted at that path and set as `CLAUDE_CONFIG_DIR`. Transcripts, prompt history, and
 file history stay in it, so agents can't read or change another workspace's sessions. The session
 hook passes the same `CLAUDE_CONFIG_DIR` to the daemon, which reads transcripts there. The folder

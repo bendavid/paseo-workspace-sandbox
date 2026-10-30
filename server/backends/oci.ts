@@ -87,7 +87,7 @@ async function prepareUser(target: ContainerTarget, policy: ContainerPolicy): Pr
       ]);
       return;
     }
-    const directories = providerDirectories();
+    const directories = policy.shareAgentState ? providerDirectories() : [];
     if (directories.length === 0) return;
     await runCli(policy.cli, [
       "exec",

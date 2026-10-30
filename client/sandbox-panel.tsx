@@ -38,6 +38,7 @@ function describe(container: ContainerStatus): string {
 }
 
 function describeClaudeFolder(claudeHome: string, dir: string | null): string {
+  if (claudeHome === "none") return "None: the profile doesn't share agent state";
   if (claudeHome === "checking" || !dir) return "Being decided as the sandbox starts";
   return claudeHome === "private" ? dir : `Shared with the host: ${dir}`;
 }

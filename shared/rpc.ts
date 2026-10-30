@@ -112,6 +112,12 @@ export const ContainerProfileSchema = z.object({
    * Bubblewrap always runs as you. Profiles from before this setting run as you.
    */
   runAsHostUser: z.boolean().optional(),
+  /**
+   * Mount the agents' own folders (~/.codex and the like) and give Claude a private config folder
+   * signed in with your host login, so agents start signed in and Paseo shows their history. When
+   * false, the sandbox gets none of it. Profiles from before this setting share.
+   */
+  shareAgentState: z.boolean().optional(),
 });
 
 export type ContainerProfile = z.infer<typeof ContainerProfileSchema>;
@@ -138,9 +144,10 @@ export const SandboxRecordSchema = z.object({
   /**
    * `private`: the container gets its own Claude config folder and signs in with the host's
    * current access token. `shared`: the container's own configuration already makes the host's
-   * folder writable, so it uses that. `checking`: being decided as the sandbox starts.
+   * folder writable, so it uses that. `checking`: being decided as the sandbox starts. `none`:
+   * the profile shares no agent state, so the sandbox has no Claude folder of the plugin's.
    */
-  claudeHome: z.enum(["private", "shared", "checking"]),
+  claudeHome: z.enum(["private", "shared", "checking", "none"]),
   /** Why `claudeHome` was chosen, for the Sandbox panel. */
   claudeHomeReason: z.string().optional(),
 });
