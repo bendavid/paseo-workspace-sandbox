@@ -27,6 +27,8 @@ test("creates a Default profile on first start and keeps at least one", async ()
     expect.objectContaining({ id: "default", name: "Default", image: DEFAULT_IMAGE }),
   ]);
   expect(["podman", "docker"]).toContain(profiles[0]?.engine);
+  // A separate network keeps the sandbox off the host's loopback, where the daemon listens.
+  expect(profiles[0]?.network).toBe("bridge");
 
   const large = await store.save(
     {

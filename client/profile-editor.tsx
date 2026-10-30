@@ -12,6 +12,7 @@ import { useCallback, useState } from "react";
 import {
   DEFAULT_IMAGE,
   ENGINE_NETWORKS,
+  defaultNetwork,
   deleteContainerProfileRpc,
   engineUsesImage,
   engineHasUserChoice,
@@ -51,14 +52,16 @@ const RUN_COMMANDS: Record<Engine, string> = {
   singularity: "singularity exec",
 };
 
+const LOOPBACK_WARNING =
+  "Host shares the host's network, including services on its loopback such as the Paseo daemon";
+
 const NETWORK_HINTS: Record<Engine, string> = {
-  podman: "Host lets agents reach the daemon on loopback",
-  docker: "Host lets agents reach the daemon on loopback",
-  bubblewrap: "Host shares the host's network",
-  microsandbox:
-    "Host allows everything, including the host's loopback; Separate allows the internet",
-  apptainer: "Host shares the host's network",
-  singularity: "Host shares the host's network",
+  podman: `Separate has its own network with internet access. ${LOOPBACK_WARNING}`,
+  docker: `Separate has its own network with internet access. ${LOOPBACK_WARNING}`,
+  microsandbox: `Separate allows the internet only. ${LOOPBACK_WARNING}`,
+  bubblewrap: `${LOOPBACK_WARNING}; there is no separate network without root`,
+  apptainer: `${LOOPBACK_WARNING}; there is no separate network without root`,
+  singularity: `${LOOPBACK_WARNING}; there is no separate network without root`,
 };
 
 const NETWORK_LABELS: Record<Network, string> = {
@@ -81,7 +84,7 @@ const BLANK: Omit<ContainerProfile, "id"> = {
   engine: "podman",
   cli: "",
   image: DEFAULT_IMAGE,
-  network: "host",
+  network: defaultNetwork("podman"),
   extraMounts: "",
   extraRunArgs: "",
   runAsHostUser: true,
@@ -180,10 +183,14 @@ function EditorForm({
   const selectEngine = useCallback((value: string) => {
     const choice = ENGINE_OPTIONS.find((option) => option.value === value);
     if (choice) {
+      // A network left at the old engine's default follows to the new engine's.
       setDraft((current) => ({
         ...current,
         engine: choice.value,
-        network: supportedNetwork(choice.value, current.network),
+        network:
+          current.network === defaultNetwork(current.engine)
+            ? defaultNetwork(choice.value)
+            : supportedNetwork(choice.value, current.network),
       }));
     }
   }, []);

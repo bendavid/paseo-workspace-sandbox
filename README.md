@@ -51,7 +51,8 @@ and extra run arguments. A new workspace copies the profile chosen in the form, 
 deleting a profile never changes an existing sandbox; the Sandbox panel shows the copy. The form's
 **Container** dropdown has **New profile** (prefilled from the selected one) and **Edit**, and
 Settings > Sandbox lists the profiles. The first profile uses Podman, or Docker when only Docker is
-installed. Profiles live in `container-profiles.json` in the plugin's data folder.
+installed, with a separate network. Profiles live in `container-profiles.json` in the plugin's data
+folder.
 
 | Engine                  | Sandbox                          | Image            | Network: Host / Separate / None                     | Tested                                  |
 | ----------------------- | -------------------------------- | ---------------- | --------------------------------------------------- | --------------------------------------- |
@@ -61,8 +62,16 @@ installed. Profiles live in `container-profiles.json` in the plugin's data folde
 | microsandbox            | One microVM per workspace        | Yes              | `--net all` / `--net public` / `--no-net`           | Yes (0.7.11)                            |
 | Apptainer / Singularity | One container per launch         | Yes, or a `.sif` | host network / not offered / `--net --network none` | Apptainer 1.5.4 (also as `singularity`) |
 
+New profiles default to **Separate** where the engine has it, and otherwise to **Host**.
 Bubblewrap, Apptainer, and Singularity have no separate network without root, so they offer only
 Host and None.
+
+**Host** shares the host's network, including services that listen only on its loopback. The Paseo
+daemon is one: with no daemon password, anything that reaches its port can control it, including
+opening terminals on the host, so a sandbox on the host network is not contained. Set a daemon
+password, or use Separate or None. Separate keeps the sandbox off the host's loopback, which also
+means agents in sandboxed terminals can't report terminal activity to the daemon, and local
+services such as a model server on `localhost` aren't reachable.
 
 The profile's **Command** is the engine's executable; empty means the default (`podman`, `docker`,
 `bwrap`, `msb`, `apptainer`, `singularity`) on `PATH`, or `~/.microsandbox/bin/msb`. Container runtimes such as krun, gVisor,
@@ -147,7 +156,7 @@ Extra mounts are host paths, one per line or comma separated, with `:ro` for rea
 contain the mounts above: mounts are applied parents first, so `~:ro` gives a read-only home around
 a read-write workspace. At a path the plugin already mounts, the plugin's access wins, so the
 workspace stays writable and git hooks and config stay read-only. Two extra mounts of one path are
-read-only if either is. The host network lets agents reach the daemon's MCP endpoint on loopback.
+read-only if either is.
 
 ### Image
 

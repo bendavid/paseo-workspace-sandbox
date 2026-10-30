@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   ContainerProfileSchema,
   DEFAULT_IMAGE,
+  defaultNetwork,
   ENGINE_NETWORKS,
   engineUsesImage,
   imageHint,
@@ -28,7 +29,7 @@ async function defaultProfile(): Promise<ContainerProfile> {
     name: "Default",
     engine,
     image: DEFAULT_IMAGE,
-    network: "host",
+    network: defaultNetwork(engine),
     extraMounts: "",
     extraRunArgs: "",
   };

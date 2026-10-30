@@ -41,6 +41,14 @@ export const ENGINE_NETWORKS: Record<Engine, readonly Network[]> = {
   singularity: ["host", "none"],
 };
 
+/**
+ * A new profile's network: a separate one where the engine has it, so the sandbox can't reach
+ * services on the host's loopback, such as the Paseo daemon; otherwise the host's.
+ */
+export function defaultNetwork(engine: Engine): Network {
+  return ENGINE_NETWORKS[engine].includes("bridge") ? "bridge" : "host";
+}
+
 /** Engines with a Run as host user choice; the others always run as you. */
 export function engineHasUserChoice(engine: Engine): boolean {
   return engine === "podman" || engine === "docker" || engine === "microsandbox";
