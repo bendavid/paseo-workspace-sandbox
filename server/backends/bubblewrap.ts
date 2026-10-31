@@ -9,8 +9,9 @@ import {
   shellQuote,
   type ContainerPolicy,
   type ContainerTarget,
+  type Mount,
 } from "../container";
-import type { SandboxBackend } from "./types";
+import { commandArguments, type SandboxBackend } from "./types";
 
 // With --clearenv nothing is inherited; the login shell environment `sandbox-run` captures, and the
 // variables it forwards, are set over these.
@@ -56,11 +57,7 @@ async function systemArguments(): Promise<string[]> {
  * Everything but the environment and the command; mounts arrive sorted parents first. The home
  * directory is a scratch folder for the launch unless a mount covers it.
  */
-async function sandboxArguments(
-  target: ContainerTarget,
-  policy: ContainerPolicy,
-): Promise<string[]> {
-  const mounts = await resolveMounts(target, policy);
+async function sandboxArguments(policy: ContainerPolicy, mounts: Mount[]): Promise<string[]> {
   return [
     "--die-with-parent",
     "--unshare-all",
@@ -104,19 +101,30 @@ export const bubblewrapBackend: SandboxBackend = {
 
   async remove() {},
 
+  async commandLine(target, policy, mounts, launch) {
+    return {
+      head: [],
+      options: [
+        ...(await sandboxArguments(policy, mounts)),
+        ...environmentArguments(target),
+        "--chdir",
+        target.workdir,
+      ],
+      tail: ["--", ...launch],
+    };
+  },
+
   async runOnce(target, policy, argv) {
-    return runCli(policy.cli, [
-      ...(await sandboxArguments(target, policy)),
-      ...environmentArguments(target),
-      "--chdir",
-      target.workdir,
-      "--",
-      ...argv,
-    ]);
+    const mounts = await resolveMounts(target, policy);
+    return runCli(
+      policy.cli,
+      commandArguments(await this.commandLine(target, policy, mounts, argv)),
+    );
   },
 
   async spec(target, policy) {
-    const fixed = [...(await sandboxArguments(target, policy)), ...environmentArguments(target)]
+    const mounts = await resolveMounts(target, policy);
+    const fixed = [...(await sandboxArguments(policy, mounts)), ...environmentArguments(target)]
       .map(shellQuote)
       .join(" ");
     return [

@@ -255,7 +255,11 @@ function addExtraMounts(mounts: Mount[], extra: readonly Mount[]): Mount[] {
  * host's plugins as a read-only seed. An extra mount that shows the host folder read-only stays as
  * the user set it.
  */
-function claudeMounts(claude: ClaudeHome): Mount[] {
+export function claudeMounts(
+  claude: ClaudeHome,
+  // The command preview's placeholder folder has no entries; it shows what a prepared one gets.
+  entryExists: (target: string) => boolean = existsSync,
+): Mount[] {
   if (claude.mode === "none") return [];
   if (claude.mode === "shared") {
     return existsSync(claude.configDir) ? [{ path: claude.configDir, readOnly: false }] : [];
@@ -267,7 +271,7 @@ function claudeMounts(claude: ClaudeHome): Mount[] {
   for (const entry of SHARED_CLAUDE_ENTRIES) {
     const source = path.join(claude.hostConfigDir, entry.name);
     const target = path.join(claude.configDir, entry.name);
-    if (existsSync(source) && existsSync(target)) {
+    if (existsSync(source) && entryExists(target)) {
       mounts.push({ path: target, source, readOnly: true });
     }
   }
@@ -293,8 +297,12 @@ export async function resolveMounts(
   for (const mount of extra) {
     if (!existsSync(mount.path)) throw new Error(`Extra mount ${mount.path} does not exist`);
   }
-  // Parents first: Bubblewrap applies mounts in the order given, so a parent listed
-  // later would hide its child.
+  return combineMounts(mounts, extra);
+}
+
+/** The plugin's mounts with the profile's extra ones, parents first. */
+export function combineMounts(mounts: Mount[], extra: readonly Mount[]): Mount[] {
+  // Bubblewrap applies mounts in the order given, so a parent listed later would hide its child.
   return addExtraMounts(mounts, extra).toSorted(
     (left, right) => left.path.split("/").length - right.path.split("/").length,
   );

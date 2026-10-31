@@ -13,8 +13,9 @@ import {
   shellQuote,
   type ContainerPolicy,
   type ContainerTarget,
+  type Mount,
 } from "../container";
-import { KEEPALIVE, type SandboxBackend } from "./types";
+import { KEEPALIVE, commandArguments, type SandboxBackend } from "./types";
 
 /**
  * Podman with only your ids mapped, to the same ids. Podman sets ping_group_range to "0 0" in a
@@ -71,13 +72,13 @@ async function squashedOptions(policy: ContainerPolicy, mountPaths: string[]): P
 async function containerOptions(
   target: ContainerTarget,
   policy: ContainerPolicy,
+  resolved: Mount[],
 ): Promise<string[]> {
   const user = userInfo();
   // As you, files the container writes keep your ownership: Podman maps your uid into its
   // namespace, Docker runs the process as your uid. Otherwise the image's default user runs.
   // keep-id alone drops your supplementary groups, so files you reach through a group (a team's
   // project folder, a shared file system) would be refused; keep-groups keeps them (crun only).
-  const resolved = await resolveMounts(target, policy);
   let identity: string[] = [];
   if (policy.user === "squashed") {
     identity = await squashedOptions(
@@ -191,25 +192,25 @@ export const ociBackend: SandboxBackend = {
       await runCli(policy.cli, ["start", target.container]);
       return;
     }
-    await runCli(
-      policy.cli,
-      [
-        "run",
-        "-d",
+    const mounts = await resolveMounts(target, policy);
+    const line = await this.commandLine(target, policy, mounts, []);
+    await runCli(policy.cli, commandArguments(line), { long: true });
+    await prepareUser(target, policy);
+  },
+
+  async commandLine(target, policy, mounts) {
+    return {
+      head: ["run", "-d"],
+      options: [
         "--name",
         target.container,
         "--label",
         `paseo.workspace-sandbox.${target.label}`,
         "--init",
-        ...(await containerOptions(target, policy)),
-        target.image,
-        "sh",
-        "-c",
-        KEEPALIVE,
+        ...(await containerOptions(target, policy, mounts)),
       ],
-      { long: true },
-    );
-    await prepareUser(target, policy);
+      tail: [target.image, "sh", "-c", KEEPALIVE],
+    };
   },
 
   status: (target, policy) => inspect(policy.cli, target.container),
@@ -230,7 +231,7 @@ export const ociBackend: SandboxBackend = {
         "--rm",
         "--label",
         "paseo.workspace-sandbox.check=1",
-        ...(await containerOptions(target, policy)),
+        ...(await containerOptions(target, policy, await resolveMounts(target, policy))),
         target.image,
         ...argv,
       ],

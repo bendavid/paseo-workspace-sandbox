@@ -9,10 +9,11 @@ import {
   shellQuote,
   type ContainerPolicy,
   type ContainerTarget,
+  type Mount,
 } from "../container";
 import { remoteDigests } from "../registry";
 import { resolveDataDirectory } from "../store";
-import type { ImageStore, SandboxBackend } from "./types";
+import { commandArguments, type ImageStore, type SandboxBackend } from "./types";
 
 /**
  * Apptainer and Singularity: a fresh container per launch from a SIF image, like Bubblewrap. They
@@ -71,14 +72,9 @@ const images: ImageStore = {
   },
 };
 
-/** The options before the image, besides the working directory. */
-async function containerArguments(
-  target: ContainerTarget,
-  policy: ContainerPolicy,
-): Promise<string[]> {
-  const mounts = await resolveMounts(target, policy);
+/** The options of `exec` before the image, besides the working directory. */
+function containerArguments(policy: ContainerPolicy, mounts: Mount[]): string[] {
   return [
-    "exec",
     // No automatic mounts of your home, the working directory, or /tmp; private /dev, PID, and IPC.
     "--containall",
     "--cleanenv",
@@ -126,21 +122,24 @@ export const apptainerBackend: SandboxBackend = {
     if (!existsSync(sifPath(target.image))) {
       throw new Error(`The image file ${sifPath(target.image)} does not exist`);
     }
-    return runCli(policy.cli, [
-      ...(await containerArguments(target, policy)),
-      "--pwd",
-      target.workdir,
-      sifPath(target.image),
-      "sh",
-      "-c",
-      loaderScript(target, false),
-      "sh",
-      ...argv,
-    ]);
+    const mounts = await resolveMounts(target, policy);
+    return runCli(
+      policy.cli,
+      commandArguments(await this.commandLine(target, policy, mounts, argv)),
+    );
+  },
+
+  async commandLine(target, policy, mounts, launch) {
+    return {
+      head: ["exec"],
+      options: [...containerArguments(policy, mounts), "--pwd", target.workdir],
+      tail: [sifPath(target.image), "sh", "-c", loaderScript(target, false), "sh", ...launch],
+    };
   },
 
   async spec(target, policy) {
-    const fixed = (await containerArguments(target, policy)).map(shellQuote).join(" ");
+    const mounts = await resolveMounts(target, policy);
+    const fixed = ["exec", ...containerArguments(policy, mounts)].map(shellQuote).join(" ");
     const image = shellQuote(sifPath(target.image));
     return [
       `sandbox_cli=${shellQuote(policy.cli)}`,

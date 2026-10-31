@@ -1,5 +1,5 @@
 import type { ContainerStatus } from "../../shared/rpc";
-import type { ContainerPolicy, ContainerTarget } from "../container";
+import type { ContainerPolicy, ContainerTarget, Mount } from "../container";
 
 /** The local image store of an engine that runs images. */
 export interface ImageStore {
@@ -14,6 +14,19 @@ export interface ImageStore {
   pullable?(image: string): boolean;
 }
 
+/** An engine's arguments, split so the profile editor can show one option per line. */
+export interface CommandLine {
+  /** The subcommand and what precedes the options, such as `run -d`. */
+  head: string[];
+  options: string[];
+  /** The image and the command, or the command alone. */
+  tail: string[];
+}
+
+export function commandArguments(line: CommandLine): string[] {
+  return [...line.head, ...line.options, ...line.tail];
+}
+
 /**
  * One engine. The plugin owns every sandbox's lifecycle through this interface; `sandbox-run` only
  * sources the spec and joins the sandbox (see the contract in `server/wrapper.ts`).
@@ -26,6 +39,17 @@ export interface SandboxBackend {
    * downloaded through `pull`, so nothing downloads without the user's say.
    */
   readonly images?: ImageStore;
+  /**
+   * What starting the sandbox runs, with the given mounts: the command that creates a persistent
+   * sandbox, where `launch` is unused, or the command that runs `launch` in a fresh one. The
+   * profile editor shows it with placeholder paths.
+   */
+  commandLine(
+    target: ContainerTarget,
+    policy: ContainerPolicy,
+    mounts: Mount[],
+    launch: string[],
+  ): Promise<CommandLine>;
   /** Makes the sandbox ready: starts or recreates a persistent one. */
   start(target: ContainerTarget, policy: ContainerPolicy): Promise<void>;
   status(target: ContainerTarget, policy: ContainerPolicy): Promise<ContainerStatus>;

@@ -12,13 +12,18 @@ import {
   shellQuote,
   type ContainerPolicy,
   type ContainerTarget,
+  type Mount,
 } from "../container";
-import type { SandboxBackend } from "./types";
+import { commandArguments, type SandboxBackend } from "./types";
 
 /** Everything after the image, shared by the sandbox and its throwaway runs. */
-async function sandboxOptions(target: ContainerTarget, policy: ContainerPolicy): Promise<string[]> {
+function sandboxOptions(
+  target: ContainerTarget,
+  policy: ContainerPolicy,
+  resolved: Mount[],
+): string[] {
   const user = userInfo();
-  const mounts = (await resolveMounts(target, policy)).flatMap((mount) => [
+  const mounts = resolved.flatMap((mount) => [
     "-v",
     `${mount.source ?? mount.path}:${mount.path}${mount.readOnly ? ":ro" : ""}`,
   ]);
@@ -131,18 +136,18 @@ export const microsandboxBackend: SandboxBackend = {
       await runCli(policy.cli, ["start", target.container], { long: true });
       return;
     }
-    await runCli(
-      policy.cli,
-      [
-        "create",
-        target.image,
-        "--name",
-        target.container,
-        ...(await sandboxOptions(target, policy)),
-      ],
-      { long: true },
-    );
+    const mounts = await resolveMounts(target, policy);
+    const line = await this.commandLine(target, policy, mounts, []);
+    await runCli(policy.cli, commandArguments(line), { long: true });
     await prepareUser(target, policy);
+  },
+
+  async commandLine(target, policy, mounts) {
+    return {
+      head: ["create", target.image],
+      options: ["--name", target.container, ...sandboxOptions(target, policy, mounts)],
+      tail: [],
+    };
   },
 
   status: (target, policy) => inspect(policy.cli, target.container),
@@ -155,7 +160,14 @@ export const microsandboxBackend: SandboxBackend = {
   async runOnce(target, policy, argv) {
     return runCli(
       policy.cli,
-      ["run", target.image, "--no-stdin", ...(await sandboxOptions(target, policy)), "--", ...argv],
+      [
+        "run",
+        target.image,
+        "--no-stdin",
+        ...sandboxOptions(target, policy, await resolveMounts(target, policy)),
+        "--",
+        ...argv,
+      ],
       { long: true },
     );
   },

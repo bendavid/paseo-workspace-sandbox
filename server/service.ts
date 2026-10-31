@@ -3,6 +3,7 @@ import type { PaseoApi } from "./paseo";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { ClaudeLoginKeeper } from "./claude-login";
 import { prepareClaudeHome } from "./claude-home";
+import { previewCommand } from "./command-preview";
 import {
   backendFor,
   checkClaudeFolder,
@@ -173,7 +174,7 @@ export class SandboxService {
   }
 
   /** A profile's engine and its command, plus the network, mounts, and run arguments. */
-  private async policy(profile: ContainerProfile): Promise<ContainerPolicy> {
+  private async policy(profile: Omit<ContainerProfile, "id">): Promise<ContainerPolicy> {
     return {
       engine: profile.engine,
       cli: await resolveEngineCli(profile.engine, profile.cli),
@@ -184,6 +185,15 @@ export class SandboxService {
       user: profileUser(profile),
       shareAgentState: profile.shareAgentState !== false,
     };
+  }
+
+  /** The command a sandbox from this profile starts with; see previewCommand. */
+  async previewCommand(profile: Omit<ContainerProfile, "id">): Promise<string> {
+    return previewCommand({
+      policy: await this.policy(profile),
+      image: profile.image,
+      hostConfigDir: this.login.hostConfigDir,
+    });
   }
 
   /** What `sandbox-run` sources to join a workspace's sandbox; see its contract in wrapper.ts. */

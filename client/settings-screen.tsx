@@ -1,3 +1,4 @@
+import type { PluginTheme } from "@getpaseo/plugin";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Loading, SettingsAction, SettingsCard, SettingsSection } from "@getpaseo/plugin/client/ui";
@@ -26,7 +27,7 @@ function ProfileRow({
 }
 
 /** Saved container profiles. Each workspace keeps a copy of the profile it was created with. */
-function ContainerProfiles() {
+function ContainerProfiles({ theme }: { theme: PluginTheme }) {
   const listProfiles = useRpc(listContainerProfilesRpc);
   const queryClient = useQueryClient();
   const profiles = useQuery({ queryKey: ["container-profiles"], queryFn: () => listProfiles({}) });
@@ -68,12 +69,12 @@ function ContainerProfiles() {
           onPress={create}
         />
       </SettingsCard>
-      <ProfileEditor target={target} onClose={close} onSaved={saved} />
+      <ProfileEditor target={target} theme={theme} onClose={close} onSaved={saved} />
     </SettingsSection>
   );
 }
 
 /** Each profile names its engine and command; there is no global container setting. */
-export function SandboxSettingsScreen(_props: PluginSurfaceProps) {
-  return <ContainerProfiles />;
+export function SandboxSettingsScreen({ theme }: PluginSurfaceProps) {
+  return <ContainerProfiles theme={theme} />;
 }

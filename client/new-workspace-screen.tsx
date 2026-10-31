@@ -786,7 +786,12 @@ export function NewSandboxedWorkspaceScreen({
         close={closePicker}
         editProfiles={editing.open}
       />
-      <ProfileEditor target={editing.target} onClose={editing.close} onSaved={editing.saved} />
+      <ProfileEditor
+        target={editing.target}
+        theme={theme}
+        onClose={editing.close}
+        onSaved={editing.saved}
+      />
       <DownloadConfirmation theme={theme} form={form} />
     </View>
   );

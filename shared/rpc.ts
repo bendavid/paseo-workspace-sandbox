@@ -354,6 +354,12 @@ export const deleteContainerProfileRpc = defineRpc({
   output: ProfileListSchema,
 });
 
+export const previewContainerCommandRpc = defineRpc({
+  name: "sandbox.container-profiles.preview-command",
+  input: z.object({ profile: ContainerProfileSchema.omit({ id: true }) }),
+  output: z.object({ command: z.string() }),
+});
+
 /** What the header badge shows: known without inspecting the container. */
 export const SandboxHealthSchema = z.discriminatedUnion("state", [
   /** The sandbox is still starting. */

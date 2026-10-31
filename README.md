@@ -50,7 +50,9 @@ A profile is a saved sandbox configuration: engine and its command, image, netwo
 and extra run arguments. A new workspace copies the profile chosen in the form, so editing or
 deleting a profile never changes an existing sandbox; the Sandbox panel shows the copy. The form's
 **Container** dropdown has **New profile** (prefilled from the selected one) and **Edit**, and
-Settings > Sandbox lists the profiles. The first profile uses Podman, or Docker when only Docker is
+Settings > Sandbox lists the profiles. The profile editor shows the **Start command** the
+settings produce, built by the same code that starts sandboxes, with placeholders such as
+`<workspace>` for what each workspace fills in. The first profile uses Podman, or Docker when only Docker is
 installed, with a separate network. Profiles live in `container-profiles.json` in the plugin's data
 folder.
 

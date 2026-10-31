@@ -18,6 +18,7 @@ import {
   listSandboxesRpc,
   listTerminalProfilesRpc,
   openSandboxShellRpc,
+  previewContainerCommandRpc,
   sandboxStatusRpc,
   saveContainerProfileRpc,
 } from "./shared/rpc";
@@ -71,6 +72,9 @@ export default function contribute(server: PluginServerContext) {
     const saved = await containerProfiles.save(profile, makeDefault);
     return { ...containerProfiles.snapshot(), saved };
   });
+  server.handle(previewContainerCommandRpc, async ({ profile }, { paseo }) => ({
+    command: await (await resolve(paseo)).previewCommand(profile),
+  }));
   server.handle(deleteContainerProfileRpc, async ({ id }) => {
     const { containerProfiles } = await loaded;
     await containerProfiles.delete(id);

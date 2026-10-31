@@ -1,14 +1,19 @@
-import { useMutation } from "@tanstack/react-query";
+import type { PluginTheme } from "@getpaseo/plugin";
+import { keepPreviousData, useMutation, useQuery } from "@tanstack/react-query";
 import { useRpc } from "@getpaseo/plugin/client";
 import {
   Modal,
+  ScrollView,
   SettingsAction,
   SettingsCard,
   SettingsInput,
+  SettingsRow,
   SettingsSelect,
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { Text, View } from "react-native";
+import { FONT } from "./standard-ui";
 import {
   DEFAULT_IMAGE,
   ENGINE_NETWORKS,
@@ -18,6 +23,7 @@ import {
   engineUsesImage,
   imageHint,
   isValidImage,
+  previewContainerCommandRpc,
   profileUser,
   saveContainerProfileRpc,
   type ContainerProfile,
@@ -111,6 +117,7 @@ export type ProfileEditorTarget =
 
 interface ProfileEditorProps {
   target: ProfileEditorTarget | null;
+  theme: PluginTheme;
   onClose(): void;
   /** Called with the saved profile, or null after a delete. */
   onSaved(profile: ContainerProfile | null): void;
@@ -147,7 +154,7 @@ function targetKey(target: ProfileEditorTarget): string {
  * Adds or edits a saved container profile. Workspaces copy a profile when they are created, so
  * saving here never changes an existing workspace's container.
  */
-export function ProfileEditor({ target, onClose, onSaved }: ProfileEditorProps) {
+export function ProfileEditor({ target, theme, onClose, onSaved }: ProfileEditorProps) {
   const openChange = useCallback(
     (open: boolean) => {
       if (!open) onClose();
@@ -162,17 +169,71 @@ export function ProfileEditor({ target, onClose, onSaved }: ProfileEditorProps) 
     >
       <Modal.Content>
         {/* Settings inputs read their initial value once, so each target mounts a fresh form. */}
-        {target ? <EditorForm key={targetKey(target)} target={target} onSaved={onSaved} /> : null}
+        {target ? (
+          <EditorForm key={targetKey(target)} target={target} theme={theme} onSaved={onSaved} />
+        ) : null}
       </Modal.Content>
     </Modal>
   );
 }
 
+/**
+ * What starting a sandbox from the draft runs, built by the engine code itself on the host, with
+ * placeholders for the paths each workspace fills in.
+ */
+function CommandPreview({ draft, theme }: { draft: Draft; theme: PluginTheme }) {
+  const preview = useRpc(previewContainerCommandRpc);
+  const query = useQuery({
+    queryKey: ["command-preview", draft],
+    queryFn: () => preview({ profile: draft }),
+    placeholderData: keepPreviousData,
+    retry: false,
+  });
+  const styles = useMemo(
+    () => ({
+      box: {
+        marginHorizontal: 16,
+        marginBottom: 16,
+        padding: 12,
+        borderRadius: 6,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        backgroundColor: theme.colors.surface0,
+      },
+      command: { fontFamily: "monospace", fontSize: FONT.sm, color: theme.colors.foreground },
+      error: { fontSize: FONT.sm, color: theme.colors.statusDanger },
+    }),
+    [theme],
+  );
+  return (
+    <SettingsCard>
+      <SettingsRow
+        label="Start command"
+        hint="What starting a sandbox from this profile runs. Each workspace fills in the <placeholders>; an engine that starts a sandbox per launch runs each launch's <command>"
+      />
+      <View style={styles.box}>
+        {query.error ? (
+          <Text style={styles.error}>{query.error.message}</Text>
+        ) : (
+          // Scrolls sideways rather than wrapping, so each option stays on its line.
+          <ScrollView horizontal>
+            <Text selectable style={styles.command}>
+              {query.data?.command ?? "…"}
+            </Text>
+          </ScrollView>
+        )}
+      </View>
+    </SettingsCard>
+  );
+}
+
 function EditorForm({
   target,
+  theme,
   onSaved,
 }: {
   target: ProfileEditorTarget;
+  theme: PluginTheme;
   onSaved(profile: ContainerProfile | null): void;
 }) {
   const save = useRpc(saveContainerProfileRpc);
@@ -308,6 +369,7 @@ function EditorForm({
           disabled={busy || (editing && target.isDefault)}
         />
       </SettingsCard>
+      <CommandPreview draft={draft} theme={theme} />
       <SettingsCard>
         <SettingsAction
           label={editing ? "Existing workspaces keep their copy" : "Saved for new workspaces"}
