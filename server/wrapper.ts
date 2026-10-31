@@ -75,6 +75,8 @@ fi
 
 # The engine's part, written by the plugin for each workspace (see server/backends):
 #   sandbox_workdir         the workspace directory inside the sandbox
+#   sandbox_host_workdir    the workspace directory on the host, as Paseo knows it
+#   sandbox_host_realdir    the same, with symbolic links resolved
 #   sandbox_tracks_pid      1 when launches join a long-lived sandbox, so signals must be forwarded
 #   sandbox_ready           succeeds when a command can run now
 #   sandbox_id              prints an ID that changes when the sandbox is recreated
@@ -82,6 +84,11 @@ fi
 #                           runs COMMAND in the sandbox with ENV_FILE's NAME=VALUE lines (none when
 #                           empty) and a TTY when TTY is 1; Bubblewrap's replaces the shell
 #   sandbox_signal SIGNAL PID_FILE, sandbox_cleanup PID_FILE    when sandbox_tracks_pid is 1
+#   sandbox_env_file        optional: NAME=VALUE lines over the captured environment (remoteEnv)
+#   sandbox_env_unset       optional: NAME|NAME... removed from the captured environment
+#   sandbox_env_probe       optional: how the environment is captured, as dev containers'
+#                           userEnvProbe: loginInteractiveShell (the default), loginShell,
+#                           interactiveShell, or none
 reverse_lines() { sed '1!G;h;$!d' "$1"; }
 
 . "$spec"
@@ -90,8 +97,13 @@ reverse_lines() { sed '1!G;h;$!d' "$1"; }
 # terminal launch, so it should be ready.
 sandbox_ready || fail "the sandbox is not running; start the agent or terminal again from Paseo, which starts it"
 
+# A launch in the workspace or below it starts at the same place inside the sandbox, where the
+# workspace may have another path. A shell started from a link reports the resolved path.
+host_workdir=\${sandbox_host_workdir:-$sandbox_workdir}
+host_realdir=\${sandbox_host_realdir:-$host_workdir}
 case $PWD in
-  "$sandbox_workdir" | "$sandbox_workdir"/*) workdir=$PWD ;;
+  "$host_workdir" | "$host_workdir"/*) workdir=$sandbox_workdir\${PWD#"$host_workdir"} ;;
+  "$host_realdir" | "$host_realdir"/*) workdir=$sandbox_workdir\${PWD#"$host_realdir"} ;;
   *) workdir=$sandbox_workdir ;;
 esac
 
@@ -109,19 +121,28 @@ tty=
 # environment it builds, captured once per sandbox: running it per launch would be slow, and
 # whatever the dotfiles print would reach the agent's protocol stream.
 login_shell='if command -v bash >/dev/null 2>&1; then exec bash -il "$@"; fi; exec sh -il "$@"'
+env_probe=\${sandbox_env_probe:-loginInteractiveShell}
+case $env_probe in
+  loginShell) probe_flags=-l ;;
+  interactiveShell) probe_flags=-i ;;
+  *) probe_flags=-il ;;
+esac
+probe_shell='if command -v bash >/dev/null 2>&1; then exec bash '$probe_flags' "$@"; fi; exec sh '$probe_flags' "$@"'
 # See environmentFile in store.ts.
 env_file=\${spec%.sh}.env
 
 capture_env() {
   id=$(sandbox_id)
   [ -n "$id" ] || return 0
-  [ "$(head -n 1 "$env_file" 2>/dev/null)" = "#sandbox=$id" ] && return 0
+  [ "$env_probe" = none ] && return 0
+  # A capture made another way is not this one.
+  [ "$(head -n 1 "$env_file" 2>/dev/null)" = "#sandbox=$id $env_probe" ] && return 0
   [ "$mode" = terminal ] && printf 'workspace-sandbox: reading the login shell environment...\\n' >&2
   marker=__paseo_sandbox_env_$$__
   # NUL-separated where env supports it, so a value spanning lines is dropped, not misread.
   capture="printf '%s\\n' $marker; if env -0 >/dev/null 2>&1; then env -0 | tr '\\n\\000' '\\001\\n'; else env; fi; printf '%s\\n' $marker"
   out=$(mktemp "\${TMPDIR:-/tmp}/paseo-sandbox-capture.XXXXXX") || return 0
-  ( sandbox_exec "" "" "$workdir" -- sh -c "$login_shell" sh -c "$capture" </dev/null >"$out" 2>/dev/null ) &
+  ( sandbox_exec "" "" "$workdir" -- sh -c "$probe_shell" sh -c "$capture" </dev/null >"$out" 2>/dev/null ) &
   capturing=$!
   # Detached from this launch's input and output, which would otherwise stay open for the
   # watchdog's sleep: an agent's protocol stream would not end until it did. Stopping it stops the
@@ -146,7 +167,7 @@ capture_env() {
   (
     umask 077
     {
-      printf '#sandbox=%s\\n' "$id"
+      printf '#sandbox=%s %s\\n' "$id" "$env_probe"
       printf '%s\\n' "$output" | sed -n "/^$marker\\$/,/^$marker\\$/p" | sed '1d;$d' |
         grep -v "$(printf '\\001')" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' |
         grep -Ev '^(PWD|OLDPWD|SHLVL|_|TERM|PS1|PS2|PS4|COLUMNS|LINES)='
@@ -159,23 +180,39 @@ if [ "$mode" = terminal ] && [ $# -eq 0 ]; then
   set -- sh -c "$login_shell" sh
 else
   capture_env
-  [ -f "$env_file" ] && captured=$env_file
+  [ "$env_probe" != none ] && [ -f "$env_file" ] && captured=$env_file
 fi
 [ $# -gt 0 ] || fail "missing command"
 
-# This launch's environment: the captured one, then the forwarded variables, which win. A file
-# readable only by you keeps values out of the engine's command line where it can read one.
+# This launch's environment: the captured one, the engine's own variables over it (a dev container's
+# remoteEnv), then the forwarded variables, which win. A file readable only by you keeps values out
+# of the engine's command line where it can read one.
 launch_env=$(mktemp "\${TMPDIR:-/tmp}/paseo-sandbox-env.XXXXXX") || fail "could not create a temporary file"
 newline='
 '
+env_unset=\${sandbox_env_unset:-}
+env_extra=\${sandbox_env_file:-}
 {
-  [ -n "$captured" ] && grep -v '^#' "$captured"
+  if [ -n "$captured" ]; then
+    if [ -n "$env_unset" ]; then
+      grep -v '^#' "$captured" | grep -Ev "^($env_unset)="
+    else
+      grep -v '^#' "$captured"
+    fi
+  fi
+  [ -n "$env_extra" ] && [ -f "$env_extra" ] && cat "$env_extra"
   for name in $forwarded; do
     eval "value=\\\${$name}"
     case $value in *"$newline"*) continue ;; esac
     printf '%s=%s\\n' "$name" "$value"
   done
 } >"$launch_env"
+
+# An unset variable may also be one the container itself sets, which exec passes on.
+if [ -n "$env_unset" ]; then
+  for name in $(printf '%s' "$env_unset" | tr '|' ' '); do set -- -u "$name" "$@"; done
+  set -- env "$@"
+fi
 
 if [ "$sandbox_tracks_pid" != 1 ]; then
   sandbox_exec "$launch_env" "$tty" "$workdir" -- "$@"

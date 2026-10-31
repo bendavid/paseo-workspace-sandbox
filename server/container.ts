@@ -1,9 +1,16 @@
 import { existsSync } from "node:fs";
-import { lstat, mkdir, rm, symlink } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
 import { execCommand } from "@getpaseo/plugin/server";
-import { type Engine, type SandboxRecord, splitArguments, type UserMode } from "../shared/rpc";
+import {
+  type AgentState,
+  type Engine,
+  profileSandboxFolder,
+  type SandboxRecord,
+  splitArguments,
+  type UserMode,
+} from "../shared/rpc";
 
 /** An engine, its command, and the parts of a sandbox's profile every engine reads. */
 export interface ContainerPolicy {
@@ -15,8 +22,10 @@ export interface ContainerPolicy {
   extraRunArgs: string;
   /** Who runs inside; see UserMode. */
   user: UserMode;
-  /** Mount the agents' own folders; see shareAgentState in the profile. */
-  shareAgentState: boolean;
+  /** How the agents' own folders reach the sandbox; see AgentState. */
+  agentState: AgentState;
+  /** Dev containers: the absolute path of the Docker or Podman command the devcontainer CLI uses. */
+  containerCli?: string;
 }
 
 export interface Mount {
@@ -68,6 +77,11 @@ export interface ContainerTarget {
   claude: ClaudeHome;
   /** For a sandboxed directory, the project directory `workspace` links to. */
   linkedDirectory?: string;
+  /**
+   * With sandbox paths, the folder the workspace is placed under inside the sandbox, such as
+   * /workspaces; without, the workspace and its git metadata keep their host paths.
+   */
+  sandboxFolder?: string;
 }
 
 export function containerName(workspaceId: string): string {
@@ -83,6 +97,9 @@ export function workspaceTarget(record: SandboxRecord, claude: ClaudeHome): Cont
     workdir: record.cwd,
     claude,
     ...(record.linkedDirectory ? { linkedDirectory: record.linkedDirectory } : {}),
+    ...(profileSandboxFolder(record.profile)
+      ? { sandboxFolder: profileSandboxFolder(record.profile)! }
+      : {}),
   };
 }
 
@@ -198,8 +215,7 @@ export function parseExtraMounts(value: string): Mount[] {
 async function linkedDirectoryMounts(link: string, directory: string): Promise<Mount[]> {
   const mountPoints = linkMountPoints(link);
   await mkdir(path.join(mountPoints, path.basename(link)), { recursive: true });
-  // Paseo archives a workspace whose directory is gone, but recreate a link removed meanwhile.
-  if (!(await lstat(link).catch(() => null))) await createLink(link, directory);
+  await ensureLink(link, directory);
   return [
     { path: path.dirname(link), source: mountPoints, readOnly: true },
     { path: link, source: directory, readOnly: false },
@@ -207,9 +223,16 @@ async function linkedDirectoryMounts(link: string, directory: string): Promise<M
   ];
 }
 
-async function workspaceMounts(cwd: string): Promise<Mount[]> {
+/** Paseo archives a workspace whose directory is gone, but recreate a link removed meanwhile. */
+async function ensureLink(link: string, directory: string): Promise<void> {
+  if (!(await lstat(link).catch(() => null))) await createLink(link, directory);
+}
+
+type GitDirectories = NonNullable<Awaited<ReturnType<typeof gitDirectories>>>;
+
+/** The workspace and its git metadata, at their host paths. */
+async function workspaceMounts(cwd: string, git: GitDirectories | null): Promise<Mount[]> {
   const mounts: Mount[] = [{ path: cwd, readOnly: false }];
-  const git = await gitDirectories(cwd);
   if (git) {
     const { common: commonDir, own } = git;
     // A worktree's objects and refs live in the source checkout's .git, so commits need it
@@ -231,6 +254,113 @@ async function workspaceMounts(cwd: string): Promise<Mount[]> {
     if (existsSync(config)) mounts.push({ path: config, readOnly: true });
   }
   return mounts;
+}
+
+/** Where the workspace runs inside the sandbox, and what is mounted for it. */
+export interface WorkspaceLayout {
+  workdir: string;
+  mounts: Mount[];
+  /** For a worktree at sandbox paths, where the repository's git directory is inside. */
+  gitCommon?: string;
+}
+
+/** A worktree that names its repository by absolute path cannot be placed at sandbox paths. */
+export class AbsoluteWorktreeError extends Error {
+  constructor(readonly workspace: string) {
+    super(
+      `The worktree ${workspace} links to its repository by absolute path, which sandbox paths cannot place. Switch the repository to relative worktree paths: git config worktree.useRelativePaths true, then git worktree repair.`,
+    );
+    this.name = "AbsoluteWorktreeError";
+  }
+}
+
+/**
+ * The workspace's mounts, at host paths or under the sandbox folder. A sandboxed directory gets
+ * `<folder>/<name>`, without the link handling host paths need; a worktree keeps its git metadata.
+ */
+export async function workspaceLayout(target: ContainerTarget): Promise<WorkspaceLayout> {
+  const folder = target.sandboxFolder;
+  if (target.linkedDirectory) {
+    if (!folder) {
+      return {
+        workdir: target.workspace,
+        mounts: await linkedDirectoryMounts(target.workspace, target.linkedDirectory),
+      };
+    }
+    await ensureLink(target.workspace, target.linkedDirectory);
+    const workdir = path.posix.join(folder, path.basename(target.linkedDirectory));
+    return {
+      workdir,
+      mounts: [{ path: workdir, source: target.linkedDirectory, readOnly: false }],
+    };
+  }
+  if (!folder) {
+    const git = await gitDirectories(target.workspace);
+    return { workdir: target.workspace, mounts: await workspaceMounts(target.workspace, git) };
+  }
+  // Real paths, so the folders in common and the git links agree with what is on disk.
+  const workspace = await realpath(target.workspace);
+  const found = await gitDirectories(workspace);
+  const git = found
+    ? { common: await realpath(found.common), own: await realpath(found.own) }
+    : null;
+  const translate = translator(await sandboxPrefixes(workspace, folder, git));
+  const worktree = git && !git.common.startsWith(`${workspace}${path.sep}`);
+  return {
+    workdir: translate(workspace),
+    mounts: (await workspaceMounts(workspace, git)).map((mount) => ({
+      path: translate(mount.path),
+      source: mount.source ?? mount.path,
+      readOnly: mount.readOnly,
+    })),
+    ...(worktree ? { gitCommon: translate(git.common) } : {}),
+  };
+}
+
+/**
+ * Host folders and where they are inside the sandbox. A checkout is `<folder>/<name>`. A linked
+ * worktree is placed as the devcontainer CLI places it: under the folders from the closest one
+ * that holds both it and the repository's git directory, which goes where the worktree's relative
+ * link points from there. Both of git's relative links then resolve inside the sandbox.
+ */
+async function sandboxPrefixes(
+  workspace: string,
+  folder: string,
+  git: GitDirectories | null,
+): Promise<Array<[string, string]>> {
+  if (!git || git.common.startsWith(`${workspace}${path.sep}`)) {
+    return [[workspace, path.posix.join(folder, path.basename(workspace))]];
+  }
+  const dotGit = await readFile(path.join(workspace, ".git"), "utf8").catch(() => "");
+  const link = /^gitdir:\s*(.+)$/m.exec(dotGit)?.[1]?.trim();
+  if (!link || path.isAbsolute(link)) throw new AbsoluteWorktreeError(workspace);
+  const segments: string[] = [];
+  for (
+    let current = workspace;
+    !git.common.startsWith(`${current}${path.sep}`) && current !== path.dirname(current);
+    current = path.dirname(current)
+  ) {
+    segments.unshift(path.basename(current));
+  }
+  const workdir = path.posix.join(folder, ...segments);
+  const common = path.posix.resolve(workdir, link, path.relative(git.own, git.common));
+  return [
+    [workspace, workdir],
+    [git.common, common],
+  ];
+}
+
+/** Maps a host path under one of the folders to its sandbox path; others stay as they are. */
+function translator(prefixes: Array<[string, string]>): (hostPath: string) => string {
+  return (hostPath) => {
+    for (const [host, sandbox] of prefixes) {
+      if (hostPath === host) return sandbox;
+      if (hostPath.startsWith(`${host}${path.sep}`)) {
+        return path.posix.join(sandbox, path.relative(host, hostPath));
+      }
+    }
+    return hostPath;
+  };
 }
 
 /**
@@ -286,18 +416,25 @@ export async function resolveMounts(
   policy: ContainerPolicy,
 ): Promise<Mount[]> {
   const extra = parseExtraMounts(policy.extraMounts);
-  const mounts = target.linkedDirectory
-    ? await linkedDirectoryMounts(target.workspace, target.linkedDirectory)
-    : await workspaceMounts(target.workspace);
-  mounts.push(...claudeMounts(target.claude));
-  if (policy.shareAgentState) {
-    for (const directory of providerDirectories())
-      mounts.push({ path: directory, readOnly: false });
-  }
+  const { mounts } = await workspaceLayout(target);
+  mounts.push(...agentStateMounts(target, policy));
   for (const mount of extra) {
     if (!existsSync(mount.path)) throw new Error(`Extra mount ${mount.path} does not exist`);
   }
   return combineMounts(mounts, extra);
+}
+
+/** The Claude folder's mounts, and the other agents' folders when the profile shares them. */
+export function agentStateMounts(target: ContainerTarget, policy: ContainerPolicy): Mount[] {
+  return [
+    ...claudeMounts(target.claude),
+    ...sharedProviderDirectories(policy).map((directory) => ({ path: directory, readOnly: false })),
+  ];
+}
+
+/** The other agents' folders a sandbox mounts: only with shared agent state. */
+export function sharedProviderDirectories(policy: ContainerPolicy): string[] {
+  return policy.agentState === "shared" ? providerDirectories() : [];
 }
 
 /** The plugin's mounts with the profile's extra ones, parents first. */

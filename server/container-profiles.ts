@@ -11,6 +11,8 @@ import {
   imageHint,
   ENGINE_USER_MODES,
   isValidImage,
+  isValidSandboxFolder,
+  profileAgentState,
   profileUser,
   splitArguments,
   type ContainerProfile,
@@ -95,12 +97,18 @@ export class ContainerProfiles {
     if (input.user && !ENGINE_USER_MODES[input.engine].includes(input.user)) {
       throw new Error(`${input.engine} has no ${input.user} user`);
     }
+    if (input.paths === "sandbox" && input.sandboxFolder?.trim()) {
+      if (!isValidSandboxFolder(input.sandboxFolder.trim())) {
+        throw new Error("The sandbox folder must be an absolute folder other than /");
+      }
+    }
     // Throws on unbalanced quotes, which would otherwise fail only when a sandbox starts.
     splitArguments(input.extraRunArgs);
-    const { runAsHostUser: _legacy, ...rest } = input;
+    const { runAsHostUser: _legacyUser, shareAgentState: _legacyState, ...rest } = input;
     const profile: ContainerProfile = {
       ...rest,
       user: profileUser(input),
+      agentState: profileAgentState(input),
       id: input.id ?? `profile-${randomUUID().slice(0, 8)}`,
     };
     const index = this.profiles.findIndex((candidate) => candidate.id === profile.id);

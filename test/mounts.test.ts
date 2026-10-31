@@ -30,7 +30,7 @@ function policy(extraMounts: string): ContainerPolicy {
     extraMounts,
     extraRunArgs: "",
     user: "host",
-    shareAgentState: true,
+    agentState: "shared",
   };
 }
 
@@ -165,7 +165,7 @@ test("a worktree keeps the other worktrees' entries read-only and its own writab
   ]);
 });
 
-test("shares the agents' folders only when the profile does", async () => {
+test("mounts the other agents' folders only with shared agent state", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "sandbox-agents-"));
   roots.push(root);
   const target = {
@@ -180,6 +180,9 @@ test("shares the agents' folders only when the profile does", async () => {
     mounts.map((mount) => mount.path).filter((p) => providerDirectories().includes(p));
   const shared = await resolveMounts(target, policy(""));
   expect(agentFolders(shared)).toEqual(providerDirectories());
-  const unshared = await resolveMounts(target, { ...policy(""), shareAgentState: false });
+  const unshared = await resolveMounts(target, { ...policy(""), agentState: "off" });
   expect(agentFolders(unshared)).toEqual([]);
+  // Isolated gives Claude a private folder; the other agents have no isolated form yet.
+  const isolated = await resolveMounts(target, { ...policy(""), agentState: "isolated" });
+  expect(agentFolders(isolated)).toEqual([]);
 });

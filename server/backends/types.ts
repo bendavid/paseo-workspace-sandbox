@@ -1,4 +1,4 @@
-import type { ContainerStatus } from "../../shared/rpc";
+import type { ContainerStatus, ImageDownload } from "../../shared/rpc";
 import type { ContainerPolicy, ContainerTarget, Mount } from "../container";
 
 /** The local image store of an engine that runs images. */
@@ -50,6 +50,13 @@ export interface SandboxBackend {
     mounts: Mount[],
     launch: string[],
   ): Promise<CommandLine>;
+  /**
+   * Engines whose configuration comes from the workspace: what creating the sandbox would do, for
+   * the user to agree to first, or null when the sandbox exists and nothing needs creating.
+   */
+  creationConsent?(target: ContainerTarget, policy: ContainerPolicy): Promise<ImageDownload | null>;
+  /** Engines that place the workspace themselves: its directory inside, once known. */
+  workspaceFolder?(target: ContainerTarget): Promise<string | null>;
   /** Makes the sandbox ready: starts or recreates a persistent one. */
   start(target: ContainerTarget, policy: ContainerPolicy): Promise<void>;
   status(target: ContainerTarget, policy: ContainerPolicy): Promise<ContainerStatus>;

@@ -13,10 +13,14 @@ import { Text } from "react-native";
 import {
   chooseImageRpc,
   describeProfile,
+  engineReadsWorkspaceConfig,
+  profileSandboxFolder,
+  recordAgentState,
   profileUser,
   USER_LABELS,
   openSandboxShellRpc,
   sandboxStatusRpc,
+  type AgentState,
   type ClaudeLogin,
   type ContainerStatus,
   type ImageChoice,
@@ -38,9 +42,15 @@ function describe(container: ContainerStatus): string {
   }
 }
 
+const AGENT_STATE_LABELS: Record<AgentState, string> = {
+  isolated: "Isolated",
+  shared: "Shared with the host",
+  off: "Off",
+};
+
 function describeClaudeFolder(claudeHome: string, dir: string | null): string {
-  if (claudeHome === "none") return "None: the profile doesn't share agent state";
-  if (claudeHome === "checking" || !dir) return "Being decided as the sandbox starts";
+  if (claudeHome === "none") return "None: agent sign-ins and history are off";
+  if (claudeHome === "checking" || !dir) return "Set as the sandbox starts";
   return claudeHome === "private" ? dir : `Shared with the host: ${dir}`;
 }
 
@@ -84,6 +94,24 @@ function ImageDownloadAction({
   const { image, reason } = download;
   const fetchImage = useCallback(() => onChoose({ image, action: "download" }), [image, onChoose]);
   const keepLocal = useCallback(() => onChoose({ image, action: "local" }), [image, onChoose]);
+  if (reason === "devcontainer") {
+    // What the workspace's configuration does, things that reach the host first.
+    return (
+      <SettingsCard>
+        <SettingsAction
+          label="Create the dev container"
+          hint={`From ${image}`}
+          actionLabel="Create the dev container"
+          onPress={fetchImage}
+          disabled={pending}
+          error={error}
+        />
+        {(download.details ?? []).map((detail) => (
+          <SettingsRow key={detail} label={detail} />
+        ))}
+      </SettingsCard>
+    );
+  }
   return (
     <SettingsCard>
       <SettingsAction
@@ -149,7 +177,7 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
       </ScrollView>
     );
   }
-  const { sandbox, container, claudeLogin, claudeConfigDir } = status.data;
+  const { sandbox, container, claudeLogin, claudeConfigDir, sandboxDirectory } = status.data;
   if (!sandbox || !container) {
     return (
       <ScrollView contentContainerStyle={styles.content}>
@@ -196,11 +224,33 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
           <SettingsRow label="Engine">
             <Text style={styles.value}>{describeProfile(sandbox.profile)}</Text>
           </SettingsRow>
-          <SettingsRow label="Network">
-            <Text style={styles.value}>{sandbox.profile.network}</Text>
+          {engineReadsWorkspaceConfig(sandbox.profile.engine) ? null : (
+            <SettingsRow label="Network">
+              <Text style={styles.value}>{sandbox.profile.network}</Text>
+            </SettingsRow>
+          )}
+          <SettingsRow label="Workspace paths">
+            <Text style={styles.value}>
+              {profileSandboxFolder(sandbox.profile)
+                ? `Sandbox paths, under ${profileSandboxFolder(sandbox.profile)}`
+                : "Host paths"}
+            </Text>
+          </SettingsRow>
+          <SettingsRow label="Login shell environment">
+            <Text style={styles.value}>
+              {engineReadsWorkspaceConfig(sandbox.profile.engine)
+                ? "As devcontainer.json's userEnvProbe says"
+                : sandbox.profile.loginEnvironment === false
+                  ? "Not read"
+                  : "Read once per sandbox"}
+            </Text>
           </SettingsRow>
           <SettingsRow label="User">
-            <Text style={styles.value}>{USER_LABELS[profileUser(sandbox.profile)]}</Text>
+            <Text style={styles.value}>
+              {engineReadsWorkspaceConfig(sandbox.profile.engine)
+                ? "The dev container's user"
+                : USER_LABELS[profileUser(sandbox.profile)]}
+            </Text>
           </SettingsRow>
           {sandbox.profile.extraMounts ? (
             <SettingsRow label="Extra mounts">
@@ -210,13 +260,18 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
           <SettingsRow label="Directory">
             <Text style={styles.value}>{sandbox.cwd}</Text>
           </SettingsRow>
+          {sandboxDirectory ? (
+            <SettingsRow label="Directory in the sandbox">
+              <Text style={styles.value}>{sandboxDirectory}</Text>
+            </SettingsRow>
+          ) : null}
+          <SettingsRow label="Agent sign-ins and history">
+            <Text style={styles.value}>{AGENT_STATE_LABELS[recordAgentState(sandbox)]}</Text>
+          </SettingsRow>
           <SettingsRow label="Claude folder">
             <Text style={styles.value}>
               {describeClaudeFolder(sandbox.claudeHome, claudeConfigDir)}
             </Text>
-            {sandbox.claudeHomeReason ? (
-              <Text style={styles.detail}>{sandbox.claudeHomeReason}</Text>
-            ) : null}
           </SettingsRow>
           {privateClaude ? (
             <SettingsRow label="Claude sign-in">

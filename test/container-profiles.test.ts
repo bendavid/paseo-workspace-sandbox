@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { ContainerProfiles } from "../server/container-profiles";
-import { DEFAULT_IMAGE, profileUser } from "../shared/rpc";
+import {
+  DEFAULT_IMAGE,
+  profileAgentState,
+  profileSandboxFolder,
+  profileUser,
+  recordAgentState,
+} from "../shared/rpc";
 
 const roots: string[] = [];
 
@@ -141,4 +147,52 @@ test("reads a sandbox's user mode, including records saved before the choice", (
   // Engines without a choice run as you, whatever the record says.
   expect(profileUser({ engine: "bubblewrap", runAsHostUser: false })).toBe("host");
   expect(profileUser({ engine: "docker", user: "squashed" })).toBe("host");
+});
+
+test("a dev container profile needs no image, and its devcontainer.json decides the rest", async () => {
+  const store = new ContainerProfiles(await directory());
+  await store.load();
+  const saved = await store.save(
+    {
+      name: "Dev container",
+      engine: "devcontainer",
+      image: "",
+      network: "bridge",
+      extraMounts: "",
+      extraRunArgs: "",
+      containerCli: "podman",
+    },
+    false,
+  );
+  expect(saved).toMatchObject({ engine: "devcontainer", containerCli: "podman", user: "image" });
+  // The CLI places the workspace under /workspaces and runs as the configuration's user.
+  expect(profileSandboxFolder(saved)).toBe("/workspaces");
+  expect(profileUser({ engine: "devcontainer", user: "host" })).toBe("image");
+});
+
+test("reads the agent state, including profiles and sandboxes from before the choice", async () => {
+  expect(profileAgentState({})).toBe("isolated");
+  expect(profileAgentState({ shareAgentState: false })).toBe("off");
+  expect(profileAgentState({ agentState: "shared", shareAgentState: false })).toBe("shared");
+  // A sandbox whose check found the host's Claude folder writable keeps sharing it.
+  expect(recordAgentState({ claudeHome: "shared", profile: {} })).toBe("shared");
+  expect(recordAgentState({ claudeHome: "private", profile: {} })).toBe("isolated");
+  expect(recordAgentState({ claudeHome: "none", profile: { shareAgentState: false } })).toBe("off");
+
+  const store = new ContainerProfiles(await directory());
+  await store.load();
+  const saved = await store.save(
+    {
+      name: "Old",
+      engine: "podman",
+      image: DEFAULT_IMAGE,
+      network: "bridge",
+      extraMounts: "",
+      extraRunArgs: "",
+      shareAgentState: false,
+    },
+    false,
+  );
+  expect(saved).toMatchObject({ agentState: "off" });
+  expect(saved).not.toHaveProperty("shareAgentState");
 });

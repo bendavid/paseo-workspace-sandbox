@@ -106,12 +106,51 @@ spaces, as in `--sysctl "net.ipv4.ping_group_range=1000 1000"`.
   launch's variables arrive on an open file descriptor that the launcher deletes before the engine
   starts. The Singularity engine uses the `singularity` command, SingularityCE's or Apptainer's
   compatible one; only the latter is tested.
+- **Dev container** builds each workspace's container from the workspace's own
+  `.devcontainer/devcontainer.json` or `.devcontainer.json` with the
+  [devcontainer CLI](https://github.com/devcontainers/cli) (`devcontainer up`), on Docker or Podman;
+  see [Dev containers](#dev-containers). The profile holds only the CLI, the **Container command**,
+  and **Agent sign-ins and history**; the configuration sets the image, user, network, and
+  mounts.
 - **BoxLite** is not supported: version 0.10.8 fails with more than two shared folders on x86_64
   (`IrqsExhausted`), and a sandbox needs at least three.
 
+### Dev containers
+
+The devcontainer CLI places the workspace as dev containers do, under `/workspaces`, so
+[sandbox paths](#workspace-paths) apply, including the relative worktree paths a sandboxed worktree
+needs and the agents that may not start in the right folder. Before creating a container the
+plugin reads the configuration with `devcontainer read-configuration`, which runs nothing, and the
+start waits for your go-ahead in the Sandbox panel. The panel lists what creating it does:
+`initializeCommand`, which the CLI runs on this host outside any container on every
+`devcontainer up`, the image or Dockerfile and features it downloads or builds, and the mounts,
+`runArgs`, privileges, capabilities, and security options that reach the host. A repository's
+configuration can mount any host folder and run anything as you, so read the list for repositories
+you don't trust. The go-ahead covers that start only; an existing container restarts with
+`podman start` (or `docker start`), without `devcontainer up`, so `initializeCommand` and
+`postStartCommand` don't run again.
+
+The CLI's `--mount` option has no read-only form, so the plugin passes its mounts, and the
+environment Claude needs, in a copy of the configuration with `--override-config`. The copy lives in
+`devcontainers/<sandbox>/` in the plugin's data folder; a `.devcontainer` folder is copied whole, so
+a Dockerfile, local features, and the lock file beside `devcontainer.json` resolve as they do there,
+and the build context stays the workspace's. It adds the Claude folder and the agents' folders, at
+their host paths as for the other engines, linked from the configuration user's home, and for a
+worktree the read-only git hooks, config, and other worktrees' entries at the paths the CLI's
+`--mount-git-worktree-common-dir` uses. A configuration that sets its own `workspaceFolder` or
+`workspaceMount` gets no git mounts, and the panel says its hooks are writable. Docker Compose
+configurations are refused. Launches join the container with `exec` as the
+configuration's user (`remoteUser`) in the CLI's workspace folder. Their environment is the one
+`userEnvProbe` captures, as for the other engines (see [Environment](#environment)), with the
+configuration's `remoteEnv` over it, its
+`${containerEnv:…}` references resolved by the CLI; a `null` entry unsets the variable, including
+one the container itself sets. Paseo's and the providers' forwarded variables still win. Archiving the workspace removes
+the container; the images the CLI built for it (`vsc-…`) stay in the engine's storage, as they do
+when you use the CLI yourself.
+
 ## What a sandbox sees
 
-Each sandbox mounts, at the same absolute paths:
+Each sandbox mounts, at the same absolute paths unless the profile uses [sandbox paths](#workspace-paths):
 
 | Path                                        | Access     | Why                                                   |
 | ------------------------------------------- | ---------- | ----------------------------------------------------- |
@@ -120,17 +159,54 @@ Each sandbox mounts, at the same absolute paths:
 | `.git/hooks`, `.git/config`                 | read-only  | Both run on the host whenever git runs there          |
 | `.git/worktrees`                            | read-only  | Other worktrees look missing inside; see below        |
 | `.git/worktrees/<this worktree>`            | read-write | The worktree's own HEAD, index, and logs              |
-| The workspace's own Claude folder           | read-write | See [Claude Code sign-in](#claude-code-sign-in)       |
+| A Claude folder                             | read-write | See [Claude Code sign-in](#claude-code-sign-in)       |
 | `~/.codex`, `~/.copilot`, `~/.pi`, `~/.omp` | read-write | Credentials, and history the daemon reads on the host |
 
-The Claude folder and provider rows apply when the profile's **Share agent sign-ins and history**
-setting is on, the default; see [Claude Code sign-in](#claude-code-sign-in). The `.git` rows apply
+The Claude folder row depends on the profile's **Agent sign-ins and history** setting, and the
+provider row applies when it is Shared; see [Claude Code sign-in](#claude-code-sign-in). The `.git` rows apply
 to sandboxed worktrees. The repository's other worktrees are not mounted, so
 git in the sandbox sees them as missing, and `git worktree prune` there would remove them on the
 host too. Their entries stay read-only, so pruning them fails, as does `git worktree add`, and
 `git worktree repair` can only change this worktree's own entry; committing and switching branches
 work. A sandboxed directory shares the project directory by
 design and has no `.git` handling.
+
+### Workspace paths
+
+The profile's **Workspace paths** setting decides where the workspace is inside the sandbox, for
+every engine. **Host paths**, the default, keeps the host paths above. **Sandbox paths** puts the
+workspace under the **Sandbox folder**, `/workspaces` unless you set another, as dev containers do:
+
+- A sandboxed directory is `<folder>/<project folder name>`. Only the project is mounted, without
+  its real path or the link handling, so files that hold the host path, such as a virtual
+  environment, break inside.
+- A worktree is placed as the devcontainer CLI's `--mount-git-worktree-common-dir` places it: the
+  folders from the closest one that holds both the worktree and the repository's `.git` down to the
+  worktree go under the sandbox folder, and `.git` goes where the worktree's link points from
+  there. A Paseo worktree in `~/.paseo/worktrees/<id>/<name>` of a repository in `~/code/proj` is
+  `/workspaces/.paseo/worktrees/<id>/<name>`, with the git directory at `/workspaces/code/proj/.git`
+  and the same read-only and read-write parts as above.
+
+Git can follow a worktree's links to the repository at other paths only when they are relative.
+Creating a sandboxed worktree with sandbox paths in a repository that links worktrees by absolute
+path asks first, and offers to switch it: `git config worktree.useRelativePaths true`, so the
+worktree Paseo creates is relative, and `git worktree repair`, which rewrites the existing
+worktrees' links. Switching needs Git 2.48 on the host, and marks the repository with
+`extensions.relativeWorktrees`: Git older than 2.48 refuses the repository and all its worktrees
+from then on, including Git in images, on other machines, and in tools with their own Git. Git in
+the sandbox also needs 2.48 to work in such a worktree. A worktree whose links are still absolute
+fails to start with sandbox paths.
+
+A process started in the workspace or a folder in it starts at the same folder inside the sandbox;
+the Sandbox panel shows the workspace's directory there. Everything else keeps its host path:
+`HOME`, the Claude and provider folders, and extra mounts.
+
+Sandbox paths may break some agents. Claude and sandboxed terminals get the workspace as their
+working directory, which `sandbox-run` translates. Codex also receives the directory in its
+protocol (`cwd` in `thread/start` and each `turn/start`), and ACP agents in `session/new`; those
+carry the host path, which the sandbox doesn't have, so their commands fail to start there. Agents
+that work see and report sandbox paths: a path in an agent's message or tool call is not one Paseo
+can open on the host, and a directory an agent passes to a Paseo tool is one the host doesn't have.
 
 ### User
 
@@ -192,8 +268,8 @@ Sandboxes are created from the current version of their image, and nothing downl
 without your go-ahead. Every run and create passes `--pull never`, and the plugin pulls only after
 you agree to that exact reference.
 
-Whenever the plugin is about to run the image, for the Claude folder check or to create the
-container or microVM (retries included), it compares the local copy with the registry:
+Whenever the plugin is about to create the container or microVM (retries included), it compares
+the local copy with the registry:
 
 - It asks the registry for the tag's current digest with a `HEAD` request, answering the
   registry's anonymous token challenge. Docker and Podman record that index digest, so this
@@ -232,8 +308,13 @@ image has no bash. Agents and terminal profiles start without a shell, so the fi
 sandbox captures the environment that shell builds and later ones reuse it. Starting each through
 the shell would be slower, and anything the dotfiles print would reach the agent's protocol stream.
 
+- The profile's **Read the login shell environment** setting, on by default, turns this off:
+  agents and terminal profiles then get only the sandbox's own environment and the forwarded
+  variables. A dev container follows its configuration's `userEnvProbe` instead: `none`,
+  `loginShell` (`bash -l`), `interactiveShell` (`bash -i`), or `loginInteractiveShell`, the default.
 - The capture lives in `workspaces/<id>.env`, readable only by you, because dotfiles can export
-  secrets. A recreated container captures again. Delete the file to pick up changed dotfiles.
+  secrets. A recreated container, or another way of capturing, captures again. Delete the file to
+  pick up changed dotfiles.
 - Variables `sandbox-run` forwards for each launch (`PASEO_*`, provider, and locale variables)
   override captured ones.
 - As Host user, squashed or not, your dotfiles only take part when an extra mount covers them, such as
@@ -241,39 +322,49 @@ the shell would be slower, and anything the dotfiles print would reach the agent
 
 ## Claude Code sign-in
 
-Everything in this section, and the provider folders' mounts, depends on the profile's **Share
-agent sign-ins and history** setting, on by default for every engine. Turned off, the sandbox gets
-no Claude folder of the plugin's, no copy of your access token or `apiKeyHelper`, no shared Claude
-entries or plugins, no `~/.codex`, `~/.copilot`, `~/.pi`, or `~/.omp`, and no links to them; the
-plugin runs no Claude folder check for it, and the session hook sets no `CLAUDE_CONFIG_DIR`. Agents
-then start signed out unless the image, an extra mount, or a forwarded variable such as
-`ANTHROPIC_API_KEY` provides credentials, and they keep their sessions inside the sandbox, where
-Paseo may not find them to show history or resume. The host login is only refreshed while some
-sandbox uses a private Claude folder.
+The profile's **Agent sign-ins and history** setting decides how the agents' own folders reach the
+sandbox, for every engine:
 
-With the setting on, each new sandbox gets its own Claude config folder, `homes/<workspace id>/claude` in the plugin's
+| Setting            | Claude                                                      | `~/.codex`, `~/.copilot`, `~/.pi`, `~/.omp` |
+| ------------------ | ----------------------------------------------------------- | ------------------------------------------- |
+| Isolated (default) | A private folder per workspace, signed in with a token copy | Not mounted                                 |
+| Shared             | Your host folder, read-write, as `CLAUDE_CONFIG_DIR`        | Read-write at their host paths              |
+| Off                | Nothing of the plugin's                                     | Not mounted                                 |
+
+Profiles saved before the setting are Isolated, or Off if they had sharing turned off. Their
+sandboxes keep the Claude folder they started with: one whose own mounts made your host folder
+writable keeps sharing it, as Shared. The other agents have no isolated form yet, so Isolated
+doesn't mount their folders: they start signed out, and Paseo may not show their history. Use
+Shared for them.
+
+**Off:** no Claude folder, token copy, or `apiKeyHelper`, no shared entries or plugins, no agent
+folders or links to them, and the session hook sets no `CLAUDE_CONFIG_DIR`. Agents start signed out
+unless the image, an extra mount, or a forwarded variable such as `ANTHROPIC_API_KEY` provides
+credentials, and they keep their sessions inside the sandbox, where Paseo may not find them to show
+history or resume.
+
+**Shared:** your Claude folder is mounted read-write at its host path and set as
+`CLAUDE_CONFIG_DIR`, which keeps `.claude.json` inside it rather than in your home folder. Sandboxed
+agents use your login, settings, skills, and transcripts, and can change all of them, including
+`.credentials.json` with its refresh token: a refresh in a sandbox rotates the token in the shared
+file, which a Claude session running on the host at the same time may not pick up. The other
+agents' folders are mounted read-write and linked from the image user's home when it isn't yours.
+There is no private folder or helper.
+
+**Isolated:** each new sandbox gets its own Claude config folder, `homes/<workspace id>/claude` in the plugin's
 data folder, mounted at that path and set as `CLAUDE_CONFIG_DIR`. Transcripts, prompt history, and
 file history stay in it, so agents can't read or change another workspace's sessions. The session
 hook passes the same `CLAUDE_CONFIG_DIR` to the daemon, which reads transcripts there. The folder
-stays after the workspace is archived, so its agents' history stays readable.
+stays after the workspace is archived, so its agents' history stays readable. The host login is
+refreshed while some sandbox is Isolated.
 
 - From your host folder, `CLAUDE.md`, `agents/`, `commands/`, `skills/`, and `output-styles/` are
   mounted read-only, and `plugins/` is the read-only `CLAUDE_CODE_PLUGIN_SEED_DIR`.
 - `settings.json` is your host's, rewritten whenever the plugin reconciles, with `apiKeyHelper`
   added. `.claude.json` is copied once without its `projects` map.
-- An extra mount that shows your host folder read-only, such as `~:ro`, stays: the sandbox can read
-  the host folder, including `.credentials.json`, but Claude Code uses the private folder. Anything
-  that used the refresh token in there would sign the host out.
-- When the sandbox's own configuration already makes your host folder writable, it uses the host
-  folder, with no private folder or helper.
-
-The decision is made once per sandbox, as it first starts, and the Sandbox panel shows it with its
-reason. A throwaway sandbox with the profile's image, user mapping, workspace, extra mounts, and
-extra run arguments, but none of the plugin's Claude mounts, checks the folder: it is shared only
-when a marker file the host just created shows there and a file can be created next to it. This
-catches `-v` in extra run arguments, symlinks, named volumes, and permissions. Anything else is
-private, a failed check included: wrongly sharing would grant writes the mounts withheld, while
-wrongly keeping it private only stops sharing transcripts.
+- An extra mount that shows your host folder, such as `~:ro`, stays: the sandbox can read the host
+  folder, including `.credentials.json`, but Claude Code uses the private folder. Anything that
+  used the refresh token in there would sign the host out.
 
 ### Sign-in
 

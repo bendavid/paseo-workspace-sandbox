@@ -50,7 +50,7 @@ describe.each(ENGINES)("sandbox-run with %s", (engine) => {
       extraMounts: "",
       extraRunArgs: "",
       user: "host",
-      shareAgentState: true,
+      agentState: "shared",
     };
     const wrapper = await writeWrapper(state);
     const specFile = path.join(state, "workspaces", "wks_e2e.sh");
@@ -81,5 +81,15 @@ describe.each(ENGINES)("sandbox-run with %s", (engine) => {
     const captured = path.join(state, "workspaces", "wks_e2e.env");
     expect(existsSync(captured), stderr).toBe(true);
     expect((await readFile(captured, "utf8")).split("\n")[0]).toMatch(/^#sandbox=/);
+
+    // A profile that doesn't read the login shell environment captures nothing.
+    await rm(captured);
+    await writeFile(specFile, `${await readFile(specFile, "utf8")}sandbox_env_probe=none\n`);
+    const off = await run(wrapper, ["terminal", "sh", "-c", 'printf "%s" "$PASEO_E2E"'], {
+      cwd: workspace,
+      env: { ...process.env, PASEO_WORKSPACE_ID: "wks_e2e", PASEO_E2E: "forwarded" },
+    });
+    expect(off.stdout).toBe("forwarded");
+    expect(existsSync(captured)).toBe(false);
   });
 });

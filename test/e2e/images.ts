@@ -2,7 +2,7 @@
 // and Singularity a SIF built from Podman's copy of it.
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -14,23 +14,28 @@ export const IMAGE = "docker.io/library/node:22-bookworm-slim";
 const SIF = path.join(tmpdir(), "paseo-sandbox-e2e-images", "node.sif");
 let sif: Promise<string | null> | null = null;
 
-/** A SIF of IMAGE built from Podman's copy, once per run; null without Podman's copy. */
+/**
+ * A SIF of IMAGE built from Podman's copy, once per run; null without Podman's copy. Test files
+ * run in parallel and may build it at once, so each builds under its own name and renames.
+ */
 function buildSif(apptainer: string): Promise<string | null> {
   sif ??= (async () => {
     if (existsSync(SIF)) return SIF;
     const podman = await resolveEngineCli("podman").catch(() => null);
     if (!podman) return null;
     await mkdir(path.dirname(SIF), { recursive: true });
-    const archive = `${SIF}.tar`;
+    const own = `${SIF}.${process.pid}.${Date.now()}`;
     try {
       await run(podman, ["image", "exists", IMAGE]);
-      await run(podman, ["save", "--format", "oci-archive", "-o", archive, IMAGE]);
-      await run(apptainer, ["build", "--force", SIF, `oci-archive://${archive}`]);
+      await run(podman, ["save", "--format", "oci-archive", "-o", `${own}.tar`, IMAGE]);
+      await run(apptainer, ["build", "--force", own, `oci-archive://${own}.tar`]);
+      await rename(own, SIF);
       return SIF;
     } catch {
-      return null;
+      return existsSync(SIF) ? SIF : null;
     } finally {
-      await rm(archive, { force: true });
+      await rm(`${own}.tar`, { force: true });
+      await rm(own, { force: true });
     }
   })();
   return sif;

@@ -16,7 +16,7 @@ import {
   type ContainerPolicy,
   type ContainerTarget,
 } from "../../server/container";
-import { ENGINE_USER_MODES, type Engine, type UserMode } from "../../shared/rpc";
+import { ENGINE_USER_MODES, type AgentState, type Engine, type UserMode } from "../../shared/rpc";
 import { imageWithoutAccount } from "./images";
 
 const run = promisify(execFile);
@@ -56,11 +56,11 @@ const REPORT = [
   'echo "memoryWritable=$(touch /tmp/p /var/tmp/p /run/p /dev/shm/p 2>/dev/null && echo yes || echo no)"',
 ].join("\n");
 
-const CASES: Array<[string, UserMode, boolean]> = [
-  ["as you", "host", true],
-  ["as you, squashed", "squashed", true],
-  ["as the image's default user", "image", true],
-  ["as the image's default user, sharing no agent state", "image", false],
+const CASES: Array<[string, UserMode, AgentState]> = [
+  ["as you", "host", "shared"],
+  ["as you, squashed", "squashed", "shared"],
+  ["as the image's default user", "image", "shared"],
+  ["as the image's default user, sharing no agent state", "image", "off"],
 ];
 
 function exec(engine: Engine, cli: string, container: string): Promise<string> {
@@ -73,7 +73,7 @@ describe.each(ENGINES)("the user in a %s sandbox", (engine) => {
   const cli = clis[engine];
   test.skipIf(!cli).each(CASES.filter(([, user]) => ENGINE_USER_MODES[engine].includes(user)))(
     "runs %s",
-    async (_label, user, shareAgentState) => {
+    async (_label, user, agentState) => {
       const asHostUser = user !== "image";
       const root = await mkdtemp(path.join(tmpdir(), "sandbox-users-e2e-"));
       roots.push(root);
@@ -92,7 +92,7 @@ describe.each(ENGINES)("the user in a %s sandbox", (engine) => {
         extraMounts: "",
         extraRunArgs: "",
         user,
-        shareAgentState,
+        agentState,
       };
       const backend = backendFor(engine);
       try {
@@ -137,7 +137,7 @@ describe.each(ENGINES)("the user in a %s sandbox", (engine) => {
           // The node image's default user is root, with /root as its home.
           expect(report).toMatchObject({ uid: "0", whoami: "root", home: "/root", safe: "*" });
           const codex = providerDirectories().find((directory) => directory.endsWith("/.codex"));
-          if (codex) expect(report.codex).toBe(shareAgentState ? codex : "");
+          if (codex) expect(report.codex).toBe(agentState === "shared" ? codex : "");
         }
       } finally {
         await backend.remove(target, policy).catch(() => undefined);

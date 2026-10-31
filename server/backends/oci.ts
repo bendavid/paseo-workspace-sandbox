@@ -7,7 +7,7 @@ import {
   extraArguments,
   hostAccount,
   isPodman,
-  providerDirectories,
+  sharedProviderDirectories,
   resolveMounts,
   runCli,
   shellQuote,
@@ -148,7 +148,7 @@ async function prepareUser(target: ContainerTarget, policy: ContainerPolicy): Pr
       ]);
       return;
     }
-    const directories = policy.shareAgentState ? providerDirectories() : [];
+    const directories = sharedProviderDirectories(policy);
     if (directories.length === 0) return;
     await runCli(policy.cli, [
       "exec",

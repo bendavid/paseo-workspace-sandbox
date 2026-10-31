@@ -62,7 +62,7 @@ describe.each(ENGINES)("a sandboxed directory with %s", (engine) => {
       extraMounts: covered ? `${root}:ro` : "",
       extraRunArgs: "",
       user: "host",
-      shareAgentState: true,
+      agentState: "shared",
     };
     const output = await backendFor(engine).runOnce(target, policy, [
       "sh",

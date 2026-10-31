@@ -1,4 +1,5 @@
-import { homedir, userInfo } from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
+import { homedir, tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
 import { formatCommand, previewCommand } from "../server/command-preview";
@@ -11,7 +12,7 @@ const policy: ContainerPolicy = {
   extraMounts: "",
   extraRunArgs: "",
   user: "host",
-  shareAgentState: false,
+  agentState: "off",
 };
 const hostConfigDir = path.join(homedir(), ".claude");
 
@@ -38,6 +39,7 @@ test("shows the workspace's mounts as placeholders, with the extra mounts and ar
     policy: { ...policy, extraMounts: "/srv:ro", extraRunArgs: `--setenv NOTE "two words"` },
     image: "",
     hostConfigDir,
+    sandboxFolder: null,
   });
   expect(command).toContain("--bind <workspace> <workspace>");
   expect(command).toContain("--ro-bind <workspace>/.git/hooks <workspace>/.git/hooks");
@@ -50,9 +52,10 @@ test("shows the workspace's mounts as placeholders, with the extra mounts and ar
 
 test("shows the private Claude folder when agent state is shared", async () => {
   const command = await previewCommand({
-    policy: { ...policy, shareAgentState: true },
+    policy: { ...policy, agentState: "isolated" },
     image: "",
     hostConfigDir,
+    sandboxFolder: null,
   });
   expect(command).toContain("--bind <claude-folder> <claude-folder>");
   expect(command).toContain("--ro-bind <claude-sign-in> <claude-sign-in>");
@@ -65,6 +68,7 @@ test("shows a squashed Podman sandbox's identity and read-only root", async () =
     policy: { ...policy, engine: "podman", cli: "podman", network: "bridge", user: "squashed" },
     image: "docker.io/library/node:22",
     hostConfigDir,
+    sandboxFolder: null,
   });
   expect(command.split("\n")[0]).toBe("podman run -d \\");
   expect(command).toContain(`--uidmap ${uid}:0:1`);
@@ -72,4 +76,31 @@ test("shows a squashed Podman sandbox's identity and read-only root", async () =
   expect(command).toContain("--read-only \\");
   expect(command).toContain("--label paseo.workspace-sandbox.workspace=<workspace-id>");
   expect(command).toMatch(/docker\.io\/library\/node:22 sh -c '[^\n]+'$/);
+});
+
+test("shows the workspace under the sandbox folder with sandbox paths", async () => {
+  const command = await previewCommand({
+    policy: { ...policy, engine: "podman", cli: "podman", network: "bridge" },
+    image: "docker.io/library/node:22",
+    hostConfigDir,
+    sandboxFolder: "/workspaces",
+  });
+  expect(command).toContain("--workdir /workspaces/<name>");
+  expect(command).toContain("-v <workspace>:/workspaces/<name> \\");
+  expect(command).toContain("-v <workspace>/.git/hooks:/workspaces/<name>/.git/hooks:ro");
+});
+
+test("shares the host's Claude folder and the agents' folders with shared agent state", async () => {
+  const claude = await mkdtemp(path.join(tmpdir(), "sandbox-preview-claude-"));
+  const command = await previewCommand({
+    policy: { ...policy, agentState: "shared" },
+    image: "",
+    hostConfigDir: claude,
+    sandboxFolder: null,
+  }).finally(() => rm(claude, { recursive: true, force: true }));
+  expect(command).toContain(`--bind ${claude} ${claude}`);
+  expect(command).toContain(`--setenv CLAUDE_CONFIG_DIR ${claude}`);
+  // No private folder, and so no sign-in copy.
+  expect(command).not.toContain("<claude-folder>");
+  expect(command).not.toContain("<claude-sign-in>");
 });

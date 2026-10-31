@@ -15,9 +15,11 @@ import {
 } from "../shared/rpc";
 
 const TERMINAL_ICON = "SquareTerminal";
-// Nothing pushes state to the app, so the list is polled: quickly while a sandbox starts, and
-// once a minute while a sandbox depends on the host's Claude login, which /logout ends at once.
+// Nothing pushes state to the app, so the list is polled: quickly while a sandbox starts, often
+// while one has failed, since the Sandbox panel's download or go-ahead starts it again, and once a
+// minute while a sandbox depends on the host's Claude login, which /logout ends at once.
 const STARTING_POLL_MS = 2_000;
+const FAILED_POLL_MS = 5_000;
 const LOGIN_POLL_MS = 60_000;
 
 interface HeaderButtons {
@@ -169,6 +171,8 @@ export function contributeHeaderBadges(client: PluginClientContext): () => void 
     }
     if (sandboxes.some((sandbox) => sandbox.health.state === "starting")) {
       schedulePoll(STARTING_POLL_MS);
+    } else if (sandboxes.some((sandbox) => sandbox.health.state === "failed")) {
+      schedulePoll(FAILED_POLL_MS);
     } else if (sandboxes.some((sandbox) => sandbox.claudeHome === "private")) {
       schedulePoll(LOGIN_POLL_MS);
     }

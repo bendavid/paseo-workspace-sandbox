@@ -16,21 +16,26 @@ import { Text, View } from "react-native";
 import { FONT } from "./standard-ui";
 import {
   DEFAULT_IMAGE,
+  DEFAULT_SANDBOX_FOLDER,
   ENGINE_NETWORKS,
   ENGINE_USER_MODES,
   defaultNetwork,
   deleteContainerProfileRpc,
+  engineReadsWorkspaceConfig,
   engineUsesImage,
   imageHint,
   isValidImage,
   previewContainerCommandRpc,
+  profileAgentState,
   profileUser,
   saveContainerProfileRpc,
+  type AgentState,
   type ContainerProfile,
   type Engine,
   type Network,
   USER_LABELS,
   type UserMode,
+  type WorkspacePaths,
 } from "../shared/rpc";
 
 const ENGINE_OPTIONS = [
@@ -40,6 +45,7 @@ const ENGINE_OPTIONS = [
   { label: "microsandbox (microVM)", value: "microsandbox" },
   { label: "Apptainer", value: "apptainer" },
   { label: "Singularity", value: "singularity" },
+  { label: "Dev container (workspace devcontainer.json)", value: "devcontainer" },
 ] as const;
 
 const DEFAULT_COMMANDS: Record<Engine, string> = {
@@ -49,6 +55,7 @@ const DEFAULT_COMMANDS: Record<Engine, string> = {
   microsandbox: "msb",
   apptainer: "apptainer",
   singularity: "singularity",
+  devcontainer: "devcontainer",
 };
 
 /** What each engine's run command is called, for the extra arguments hint. */
@@ -59,6 +66,7 @@ const RUN_COMMANDS: Record<Engine, string> = {
   microsandbox: "msb create",
   apptainer: "apptainer exec",
   singularity: "singularity exec",
+  devcontainer: "devcontainer up",
 };
 
 const LOOPBACK_WARNING =
@@ -71,6 +79,7 @@ const NETWORK_HINTS: Record<Engine, string> = {
   bubblewrap: `${LOOPBACK_WARNING}; there is no separate network without root`,
   apptainer: `${LOOPBACK_WARNING}; there is no separate network without root`,
   singularity: `${LOOPBACK_WARNING}; there is no separate network without root`,
+  devcontainer: "Set by the workspace's devcontainer.json",
 };
 
 const NETWORK_LABELS: Record<Network, string> = {
@@ -95,6 +104,31 @@ const USER_HINTS: Record<UserMode, string> = {
   image: "The image's default user and home; files it writes to mounts may belong to that user",
 };
 
+const AGENT_STATE_OPTIONS = [
+  { label: "Isolated", value: "isolated" },
+  { label: "Shared", value: "shared" },
+  { label: "Off", value: "off" },
+] as const;
+
+const AGENT_STATE_HINTS: Record<AgentState, string> = {
+  isolated:
+    "Claude gets a private folder per workspace, signed in with your host login through a copy of its current token, with your settings and skills read-only. Other agents' folders aren't mounted",
+  shared:
+    "Your Claude folder and ~/.codex, ~/.copilot, ~/.pi, and ~/.omp are mounted read-write: agents use your host sign-ins, settings, and history, and can change them",
+  off: "Agents start signed out unless the image, a mount, or a forwarded API key provides credentials, and Paseo may not show their history",
+};
+
+const PATH_OPTIONS = [
+  { label: "Host paths", value: "host" },
+  { label: "Sandbox paths", value: "sandbox" },
+] as const;
+
+const PATH_HINTS: Record<WorkspacePaths, string> = {
+  host: "The workspace and its git metadata keep their host paths inside the sandbox",
+  sandbox:
+    "The workspace is at <folder>/<name> inside the sandbox, as in dev containers. This may break some agents: Codex and ACP agents are told the host path, which the sandbox doesn't have. Worktrees need the repository to use relative worktree paths (Git 2.48 or newer)",
+};
+
 function userOptions(engine: Engine) {
   return ENGINE_USER_MODES[engine].map((value) => ({ label: USER_LABELS[value], value }));
 }
@@ -108,7 +142,11 @@ const BLANK: Omit<ContainerProfile, "id"> = {
   extraMounts: "",
   extraRunArgs: "",
   user: "host",
-  shareAgentState: true,
+  agentState: "isolated",
+  loginEnvironment: true,
+  paths: "host",
+  sandboxFolder: "",
+  containerCli: "",
 };
 
 export type ProfileEditorTarget =
@@ -136,7 +174,11 @@ function fields(profile: ContainerProfile): Draft {
     extraMounts: profile.extraMounts,
     extraRunArgs: profile.extraRunArgs,
     user: profileUser(profile),
-    shareAgentState: profile.shareAgentState !== false,
+    agentState: profileAgentState(profile),
+    loginEnvironment: profile.loginEnvironment !== false,
+    paths: profile.paths ?? "host",
+    sandboxFolder: profile.sandboxFolder ?? "",
+    containerCli: profile.containerCli ?? "",
   };
 }
 
@@ -273,6 +315,12 @@ function EditorForm({
   const selectUser = useCallback((user: UserMode) => {
     setDraft((current) => ({ ...current, user }));
   }, []);
+  const selectAgentState = useCallback((agentState: AgentState) => {
+    setDraft((current) => ({ ...current, agentState }));
+  }, []);
+  const selectPaths = useCallback((paths: WorkspacePaths) => {
+    setDraft((current) => ({ ...current, paths }));
+  }, []);
   const submit = useCallback(() => {
     saving.mutate({
       profile: { ...draft, ...(target.mode === "edit" ? { id: target.profile.id } : {}) },
@@ -286,6 +334,8 @@ function EditorForm({
   const editing = target.mode === "edit";
   const { engine } = draft;
   const needsImage = engineUsesImage(engine);
+  // A dev container's image, user, network, mounts, and run arguments are in its devcontainer.json.
+  const fromWorkspace = engineReadsWorkspaceConfig(engine);
   return (
     <>
       <SettingsCard>
@@ -309,6 +359,21 @@ function EditorForm({
           onChangeText={field("cli")}
           disabled={busy}
         />
+        {fromWorkspace ? (
+          <>
+            <SettingsInput
+              label="Container command"
+              hint="Docker or Podman, for the devcontainer CLI; leave empty for docker, or podman without it"
+              initialValue={draft.containerCli ?? ""}
+              onChangeText={field("containerCli")}
+              disabled={busy}
+            />
+            <SettingsRow
+              label="Configuration"
+              hint="Read from each workspace's .devcontainer/devcontainer.json or .devcontainer.json, which sets the image, user, network, mounts, remoteEnv, and userEnvProbe. The plugin adds the agents' folders and keeps Git hooks read-only. Creating a container asks first, showing what it runs on this host and downloads. Agents other than Claude may not start in the right folder"
+            />
+          </>
+        ) : null}
         {needsImage ? (
           <SettingsInput
             label="Image"
@@ -318,15 +383,12 @@ function EditorForm({
             disabled={busy}
           />
         ) : null}
-        <SettingsSwitch
-          label="Share agent sign-ins and history"
-          hint={
-            draft.shareAgentState !== false
-              ? "Mounts ~/.codex and the other agents' folders, and gives Claude a private folder signed in with your host login"
-              : "Agents start signed out unless the image or an extra mount provides credentials, and Paseo may not show their history"
-          }
-          value={draft.shareAgentState !== false}
-          onValueChange={field("shareAgentState")}
+        <SettingsSelect
+          label="Agent sign-ins and history"
+          hint={AGENT_STATE_HINTS[profileAgentState(draft)]}
+          value={profileAgentState(draft)}
+          options={AGENT_STATE_OPTIONS}
+          onValueChange={selectAgentState}
           disabled={busy}
         />
         {ENGINE_USER_MODES[engine].length > 1 ? (
@@ -339,28 +401,61 @@ function EditorForm({
             disabled={busy}
           />
         ) : null}
-        <SettingsSelect
-          label="Network"
-          hint={NETWORK_HINTS[engine]}
-          value={draft.network}
-          options={networkOptions(engine)}
-          onValueChange={field("network")}
-          disabled={busy}
-        />
-        <SettingsInput
-          label="Extra mounts"
-          hint="Host paths mounted at the same path, comma separated; append :ro for read-only"
-          initialValue={draft.extraMounts}
-          onChangeText={field("extraMounts")}
-          disabled={busy}
-        />
-        <SettingsInput
-          label="Extra run arguments"
-          hint={`Added to ${RUN_COMMANDS[engine]}; quote values with spaces`}
-          initialValue={draft.extraRunArgs}
-          onChangeText={field("extraRunArgs")}
-          disabled={busy}
-        />
+        {fromWorkspace ? null : (
+          <>
+            <SettingsSwitch
+              label="Read the login shell environment"
+              hint={
+                draft.loginEnvironment !== false
+                  ? "Agents and terminal profiles get what the sandbox's shell startup files set, such as PATH, read once per sandbox"
+                  : "Agents and terminal profiles get only the sandbox's own environment and Paseo's variables"
+              }
+              value={draft.loginEnvironment !== false}
+              onValueChange={field("loginEnvironment")}
+              disabled={busy}
+            />
+            <SettingsSelect
+              label="Workspace paths"
+              hint={PATH_HINTS[draft.paths ?? "host"]}
+              value={draft.paths ?? "host"}
+              options={PATH_OPTIONS}
+              onValueChange={selectPaths}
+              disabled={busy}
+            />
+            {draft.paths === "sandbox" ? (
+              <SettingsInput
+                label="Sandbox folder"
+                hint="Where workspaces go inside the sandbox"
+                initialValue={draft.sandboxFolder ?? ""}
+                placeholder={DEFAULT_SANDBOX_FOLDER}
+                onChangeText={field("sandboxFolder")}
+                disabled={busy}
+              />
+            ) : null}
+            <SettingsSelect
+              label="Network"
+              hint={NETWORK_HINTS[engine]}
+              value={draft.network}
+              options={networkOptions(engine)}
+              onValueChange={field("network")}
+              disabled={busy}
+            />
+            <SettingsInput
+              label="Extra mounts"
+              hint="Host paths mounted at the same path, comma separated; append :ro for read-only"
+              initialValue={draft.extraMounts}
+              onChangeText={field("extraMounts")}
+              disabled={busy}
+            />
+            <SettingsInput
+              label="Extra run arguments"
+              hint={`Added to ${RUN_COMMANDS[engine]}; quote values with spaces`}
+              initialValue={draft.extraRunArgs}
+              onChangeText={field("extraRunArgs")}
+              disabled={busy}
+            />
+          </>
+        )}
         <SettingsSwitch
           label="Default profile"
           hint="Preselected for new sandboxed workspaces"

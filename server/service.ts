@@ -1,15 +1,11 @@
 import { randomBytes } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import type { PaseoApi } from "./paseo";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { ClaudeLoginKeeper } from "./claude-login";
 import { prepareClaudeHome } from "./claude-home";
 import { previewCommand } from "./command-preview";
-import {
-  backendFor,
-  checkClaudeFolder,
-  resolveEngineCli,
-  type ClaudeFolderAccess,
-} from "./backends/index";
+import { backendFor, resolveContainerCli, resolveEngineCli } from "./backends/index";
 import type { ImageStore } from "./backends/types";
 import { checkImage } from "./registry";
 import {
@@ -17,24 +13,31 @@ import {
   createLink,
   removeLink,
   shellQuote,
+  workspaceLayout,
   workspaceTarget,
   type ClaudeHome,
   type ContainerPolicy,
   type ContainerTarget,
 } from "./container";
 import type { ContainerProfiles } from "./container-profiles";
-import { listRefs } from "./git";
+import { enableRelativeWorktrees, listRefs, relativeWorktrees } from "./git";
 import { resolveTerminalLaunch } from "./terminals";
 import { writeFileAtomic, type SandboxStore } from "./store";
 import {
+  CLAUDE_HOME_FOR,
+  engineReadsWorkspaceConfig,
   engineUsesImage,
   imageHint,
   isValidImage,
+  profileAgentState,
+  profileSandboxFolder,
+  recordAgentState,
   profileUser,
   type ContainerProfile,
   type ContainerStatus,
   type ImageChoice,
   type ImageDownload,
+  type RelativeWorktrees,
   type SandboxHealth,
   type SandboxRecord,
   type createSandboxedWorkspaceRpc,
@@ -46,14 +49,6 @@ import {
 } from "../shared/rpc";
 
 type CreateInput = RpcInput<typeof createSandboxedWorkspaceRpc>;
-
-// Why a sandbox whose configuration could show the host's Claude folder still gets a private one.
-const PRIVATE_REASONS: Record<Exclude<ClaudeFolderAccess, "writable">, string> = {
-  "read-only": "The sandbox's mounts show the host's Claude folder read-only",
-  other: "Another folder sits at the host Claude folder's path in the sandbox",
-  absent: "The sandbox's mounts don't show the host's Claude folder",
-  unknown: "The check could not tell how the host's Claude folder shows",
-};
 
 /** Reads every page: a sandbox missing from a partial listing would be destroyed. */
 async function listActiveWorkspaceIds(paseo: PaseoApi): Promise<Set<string>> {
@@ -108,9 +103,11 @@ function buildWorkspaceRequest(
 class ImageDownloadError extends Error {
   constructor(readonly download: ImageDownload) {
     super(
-      download.reason === "missing"
-        ? `The image ${download.image} is not on this machine. Download it from the Sandbox panel.`
-        : `The registry has a newer ${download.image} than this machine. Update it or use the local image from the Sandbox panel.`,
+      download.reason === "devcontainer"
+        ? "Creating the dev container waits for your go-ahead. Review what it does in the Sandbox panel."
+        : download.reason === "missing"
+          ? `The image ${download.image} is not on this machine. Download it from the Sandbox panel.`
+          : `The registry has a newer ${download.image} than this machine. Update it or use the local image from the Sandbox panel.`,
     );
     this.name = "ImageDownloadError";
   }
@@ -170,7 +167,21 @@ export class SandboxService {
         helperCommand: this.login.helperCommand,
       });
     }
-    return workspaceTarget(record, claude);
+    return this.layoutTarget(record, claude);
+  }
+
+  /** A workspace's container target, with its working directory inside the sandbox. */
+  private async layoutTarget(record: SandboxRecord, claude: ClaudeHome): Promise<ContainerTarget> {
+    const target = workspaceTarget(record, claude);
+    if (!target.sandboxFolder) return target;
+    // An engine that places the workspace itself knows where, once the sandbox exists.
+    const placed = await backendFor(record.profile.engine).workspaceFolder?.(target);
+    return { ...target, workdir: placed || (await workspaceLayout(target)).workdir };
+  }
+
+  /** A sandbox's policy, with the agent state its Claude folder was settled with. */
+  private async recordPolicy(record: SandboxRecord): Promise<ContainerPolicy> {
+    return { ...(await this.policy(record.profile)), agentState: recordAgentState(record) };
   }
 
   /** A profile's engine and its command, plus the network, mounts, and run arguments. */
@@ -183,7 +194,10 @@ export class SandboxService {
       extraRunArgs: profile.extraRunArgs,
       // Engines without the choice always run as you; profiles from before the setting do too.
       user: profileUser(profile),
-      shareAgentState: profile.shareAgentState !== false,
+      agentState: profileAgentState(profile),
+      ...(engineReadsWorkspaceConfig(profile.engine)
+        ? { containerCli: await resolveContainerCli(profile.containerCli) }
+        : {}),
     };
   }
 
@@ -193,6 +207,7 @@ export class SandboxService {
       policy: await this.policy(profile),
       image: profile.image,
       hostConfigDir: this.login.hostConfigDir,
+      sandboxFolder: profileSandboxFolder(profile),
     });
   }
 
@@ -206,28 +221,58 @@ export class SandboxService {
       this.store.specFile(record.workspaceId),
       [
         `# Generated by the workspace-sandbox plugin: ${policy.engine}.`,
-        `sandbox_workdir=${shellQuote(record.cwd)}`,
+        `sandbox_workdir=${shellQuote(target.workdir)}`,
+        // Where launches start on the host, by the path Paseo knows and by its real path.
+        `sandbox_host_workdir=${shellQuote(record.cwd)}`,
+        `sandbox_host_realdir=${shellQuote(await realpath(record.cwd).catch(() => record.cwd))}`,
+        // A dev container's spec says how, from its devcontainer.json.
+        ...(engineReadsWorkspaceConfig(policy.engine)
+          ? []
+          : [
+              `sandbox_env_probe=${record.profile.loginEnvironment === false ? "none" : "loginInteractiveShell"}`,
+            ]),
         await backendFor(policy.engine).spec(target, policy),
         "",
       ].join("\n"),
     );
   }
 
-  /** Decides the Claude folder if that is still open, then starts or recreates the container. */
-  private async runContainer(record: SandboxRecord): Promise<void> {
-    const policy = await this.policy(record.profile);
+  /** Starts or recreates the container. */
+  private async runContainer(listed: SandboxRecord): Promise<void> {
+    const record = await this.settleClaudeHome(listed);
+    const policy = await this.recordPolicy(record);
     const backend = backendFor(policy.engine);
-    // The Claude folder check and creating the sandbox, retries included, run the image, so it is
-    // checked against its registry first. Restarting an existing container or microVM is not.
+    // Creating the sandbox, retries included, runs the image, so it is checked against its
+    // registry first. Restarting an existing container or microVM is not.
     const runsImage =
-      record.claudeHome === "checking" ||
       (await backend.status(workspaceTarget(record, { mode: "none" }), policy)).state === "missing";
     if (backend.images && runsImage) await this.ensureImage(record, policy, backend.images);
-    const decided =
-      record.claudeHome === "checking" ? await this.decideClaudeHome(record, policy) : record;
-    const target = await this.prepareTarget(decided);
-    await this.writeSpec(decided, target, policy);
+    if (backend.creationConsent) await this.ensureConsent(record, policy);
+    const target = await this.prepareTarget(record);
+    await this.writeSpec(record, target, policy);
     await backend.start(target, policy);
+    // An engine that places the workspace itself has said where only now.
+    if (backend.workspaceFolder) {
+      await this.writeSpec(record, await this.layoutTarget(record, target.claude), policy);
+    }
+  }
+
+  /**
+   * A sandbox described by the workspace's own configuration is created only when the user agreed
+   * to what creating it does, which can run commands on the host and download; like an image
+   * choice, the answer covers the next attempt only.
+   */
+  private async ensureConsent(record: SandboxRecord, policy: ContainerPolicy): Promise<void> {
+    const backend = backendFor(policy.engine);
+    const needed = await backend.creationConsent?.(
+      workspaceTarget(record, { mode: "none" }),
+      policy,
+    );
+    if (!needed) return;
+    const choice = this.imageChoices.get(record.workspaceId);
+    if (choice?.image !== needed.image || choice.action !== "download") {
+      throw new ImageDownloadError(needed);
+    }
   }
 
   /**
@@ -259,37 +304,17 @@ export class SandboxService {
   }
 
   /**
-   * A sandbox shares the host's Claude folder only when its own configuration already makes that
-   * folder writable, which a container with the same configuration finds out. Anything else, a
-   * failed check included, gets a private folder: wrongly sharing would grant writes the mounts
-   * withheld, while wrongly keeping it private only stops sharing transcripts.
+   * A sandbox from before the agent state choice whose Claude folder a check was still to decide
+   * gets the folder its profile's agent state gives.
    */
-  private async decideClaudeHome(
-    record: SandboxRecord,
-    policy: ContainerPolicy,
-  ): Promise<SandboxRecord> {
-    let claudeHome: "private" | "shared" = "private";
-    let reason: string;
-    try {
-      const access = await checkClaudeFolder(
-        backendFor(policy.engine),
-        workspaceTarget(record, { mode: "none" }),
-        policy,
-        this.login.hostConfigDir,
-      );
-      if (access === "writable") {
-        claudeHome = "shared";
-        reason = "The sandbox's mounts make the host's Claude folder writable";
-      } else {
-        reason = PRIVATE_REASONS[access];
-      }
-    } catch (error) {
-      reason = `The check could not run (${describeError(error)})`;
-    }
-    if (!this.store.get(record.workspaceId)) throw new Error("The sandbox was removed");
-    const decided: SandboxRecord = { ...record, claudeHome, claudeHomeReason: reason };
-    await this.store.put(decided);
-    return decided;
+  private async settleClaudeHome(record: SandboxRecord): Promise<SandboxRecord> {
+    if (record.claudeHome !== "checking") return record;
+    const settled: SandboxRecord = {
+      ...record,
+      claudeHome: CLAUDE_HOME_FOR[profileAgentState(record.profile)],
+    };
+    if (this.store.get(record.workspaceId)) await this.store.put(settled);
+    return settled;
   }
 
   /**
@@ -349,6 +374,23 @@ export class SandboxService {
     }
   }
 
+  /** Whether a project's new worktrees link to the repository relatively; see relativeWorktrees. */
+  async relativeWorktrees(projectId: string, paseo: PaseoApi): Promise<RelativeWorktrees> {
+    return relativeWorktrees((await this.gitProject(projectId, paseo)).projectRootPath);
+  }
+
+  /** Switches a project's repository to relative worktree paths, existing worktrees included. */
+  async enableRelativeWorktrees(projectId: string, paseo: PaseoApi): Promise<RelativeWorktrees> {
+    return enableRelativeWorktrees((await this.gitProject(projectId, paseo)).projectRootPath);
+  }
+
+  private async gitProject(projectId: string, paseo: PaseoApi) {
+    const project = await this.project(projectId, paseo);
+    if (project.projectKind !== "git")
+      throw new Error(`${project.projectDisplayName} is not a Git project`);
+    return project;
+  }
+
   async refs(input: RpcInput<typeof listRefsRpc>, paseo: PaseoApi) {
     const project = await this.project(input.projectId, paseo);
     if (project.projectKind !== "git") return { current: null, refs: [] };
@@ -380,6 +422,20 @@ export class SandboxService {
         `The image ${input.imageChoice.image} is not the profile's (${profile.image})`,
       );
     }
+    // Paseo creates the worktree; at sandbox paths its git links must be relative to resolve.
+    if (isolation === "worktree" && profileSandboxFolder(profile)) {
+      const { state, gitVersion } = await relativeWorktrees(project.projectRootPath);
+      if (state === "unsupported") {
+        throw new Error(
+          `Sandbox paths for worktrees need Git 2.48 or newer; this host has ${gitVersion}`,
+        );
+      }
+      if (state === "absolute") {
+        throw new Error(
+          "Sandbox paths for worktrees need the repository's worktrees to use relative paths",
+        );
+      }
+    }
     return { profile, project, isolation, policy };
   }
 
@@ -403,8 +459,7 @@ export class SandboxService {
       createdAt: new Date().toISOString(),
       profile: plan.profile,
       pending: true,
-      // Without shared agent state there is no Claude folder to decide on.
-      claudeHome: plan.profile.shareAgentState === false ? "none" : "checking",
+      claudeHome: CLAUDE_HOME_FOR[profileAgentState(plan.profile)],
       ...(directory ? { linkedDirectory: plan.project.projectRootPath } : {}),
     };
     this.creating.add(workspaceId);
@@ -456,7 +511,11 @@ export class SandboxService {
   async chooseImage(workspaceId: string, choice: ImageChoice): Promise<void> {
     const record = this.store.get(workspaceId);
     if (!record) throw new Error("This workspace is not sandboxed");
-    if (choice.image !== record.profile.image) {
+    // A dev container's go-ahead names the configuration the last attempt asked about.
+    const expected = engineReadsWorkspaceConfig(record.profile.engine)
+      ? this.failures.get(workspaceId)?.download?.image
+      : record.profile.image;
+    if (choice.image !== expected) {
       throw new Error(`The image ${choice.image} is not the sandbox's`);
     }
     // Let a running attempt finish, so the choice belongs to a fresh one.
@@ -495,6 +554,7 @@ export class SandboxService {
         container: null,
         claudeLogin,
         claudeConfigDir: null,
+        sandboxDirectory: null,
       };
     }
     const claude = this.claudeHome(sandbox);
@@ -510,12 +570,21 @@ export class SandboxService {
       container,
       claudeLogin,
       claudeConfigDir: claude.mode === "none" ? null : claude.configDir,
+      sandboxDirectory: await this.sandboxDirectory(sandbox),
     };
+  }
+
+  /** With sandbox paths, where the workspace is inside; null if its layout can't be made. */
+  private async sandboxDirectory(sandbox: SandboxRecord): Promise<string | null> {
+    if (sandbox.pending || !profileSandboxFolder(sandbox.profile)) return null;
+    return this.layoutTarget(sandbox, { mode: "none" })
+      .then((target) => target.workdir)
+      .catch(() => null);
   }
 
   /** A failed start stays reported until a later attempt runs the container. */
   private async inspectAfterFailure(sandbox: SandboxRecord): Promise<ContainerStatus> {
-    const policy = await this.policy(sandbox.profile);
+    const policy = await this.recordPolicy(sandbox);
     const inspected = await backendFor(policy.engine).status(
       workspaceTarget(sandbox, { mode: "none" }),
       policy,
@@ -562,7 +631,7 @@ export class SandboxService {
     if (!record) return;
     await this.starting.get(workspaceId);
     this.failures.delete(workspaceId);
-    const policy = await this.policy(record.profile);
+    const policy = await this.recordPolicy(record);
     await backendFor(policy.engine).remove(workspaceTarget(record, { mode: "none" }), policy);
     if (record.linkedDirectory) await removeLink(this.store.linkPath(workspaceId));
   }
@@ -594,12 +663,7 @@ export class SandboxService {
       }
       const record = listed.pending ? await this.completePending(listed, paseo) : listed;
       if (!record) continue;
-      // A sandbox the daemon stopped preparing is decided and started now; others start on use.
-      if (record.claudeHome === "checking") {
-        void this.ensureRunning(record.workspaceId);
-        continue;
-      }
-      await this.refreshSpec(record).catch((error: unknown) =>
+      await this.refreshSpec(await this.settleClaudeHome(record)).catch((error: unknown) =>
         console.error(`Sandbox ${record.workspaceId} could not be prepared`, describeError(error)),
       );
     }
@@ -607,7 +671,7 @@ export class SandboxService {
 
   /** Rewrites a sandbox's spec and private Claude folder for the current plugin and settings. */
   private async refreshSpec(record: SandboxRecord): Promise<void> {
-    const policy = await this.policy(record.profile);
+    const policy = await this.recordPolicy(record);
     await this.writeSpec(record, await this.prepareTarget(record), policy);
   }
 }

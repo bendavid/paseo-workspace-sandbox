@@ -37,7 +37,7 @@ test.skipIf(!available)("passes a quoted value with spaces as one argument", asy
     extraMounts: "",
     extraRunArgs: `--sysctl "net.ipv4.ping_group_range=1000 1000" --label 'e2e.note=two words'`,
     user: "host",
-    shareAgentState: false,
+    agentState: "off",
   };
   try {
     await backend.start(target, policy);

@@ -5,8 +5,9 @@ import {
   claudeMounts,
   combineMounts,
   parseExtraMounts,
-  providerDirectories,
+  sharedProviderDirectories,
   shellQuote,
+  type ClaudeHome,
   type ContainerPolicy,
   type ContainerTarget,
   type Mount,
@@ -26,31 +27,49 @@ export async function previewCommand(input: {
   policy: ContainerPolicy;
   image: string;
   hostConfigDir: string;
+  /** With sandbox paths, the folder workspaces go under. */
+  sandboxFolder: string | null;
 }): Promise<string> {
-  const { policy, hostConfigDir } = input;
+  const { policy, hostConfigDir, sandboxFolder } = input;
+  // A checkout at sandbox paths is <folder>/<name>; a worktree also brings the folders above it.
+  const workdir = sandboxFolder ? path.posix.join(sandboxFolder, "<name>") : WORKSPACE;
   const target: ContainerTarget = {
     container: "<sandbox>",
     label: "workspace=<workspace-id>",
     image: input.image || "<image>",
     workspace: WORKSPACE,
-    workdir: WORKSPACE,
-    claude: policy.shareAgentState
-      ? { mode: "private", configDir: CLAUDE_FOLDER, hostConfigDir, authDir: SIGN_IN_FOLDER }
-      : { mode: "none" },
+    workdir,
+    claude: previewClaude(policy, hostConfigDir),
   };
   const git = path.join(WORKSPACE, ".git");
-  const mounts: Mount[] = [
+  const workspace: Mount[] = [
     { path: WORKSPACE, readOnly: false },
     { path: path.join(git, "hooks"), readOnly: true },
     { path: path.join(git, "config"), readOnly: true },
+  ].map((mount) =>
+    sandboxFolder
+      ? { ...mount, source: mount.path, path: mount.path.replace(WORKSPACE, workdir) }
+      : mount,
+  );
+  const mounts: Mount[] = [
+    ...workspace,
     ...claudeMounts(target.claude, () => true),
-    ...(policy.shareAgentState
-      ? providerDirectories().map((directory) => ({ path: directory, readOnly: false }))
-      : []),
+    ...sharedProviderDirectories(policy).map((directory) => ({ path: directory, readOnly: false })),
   ];
   const combined = combineMounts(mounts, parseExtraMounts(policy.extraMounts));
   const line = await backendFor(policy.engine).commandLine(target, policy, combined, ["<command>"]);
   return formatCommand(policy.cli, line);
+}
+
+function previewClaude(policy: ContainerPolicy, hostConfigDir: string): ClaudeHome {
+  switch (policy.agentState) {
+    case "isolated":
+      return { mode: "private", configDir: CLAUDE_FOLDER, hostConfigDir, authDir: SIGN_IN_FOLDER };
+    case "shared":
+      return { mode: "shared", configDir: hostConfigDir };
+    case "off":
+      return { mode: "none" };
+  }
 }
 
 /** Placeholders and plain words stay as they are; anything else is shell-quoted. */

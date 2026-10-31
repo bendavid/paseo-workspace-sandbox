@@ -19,6 +19,10 @@ import {
 } from "react-native";
 import {
   createSandboxedWorkspaceRpc,
+  enableRelativeWorktreesRpc,
+  profileSandboxFolder,
+  relativeWorktreesStatusRpc,
+  type RelativeWorktrees,
   describeProfile,
   imageStatusRpc,
   listContainerProfilesRpc,
@@ -97,6 +101,8 @@ function useSandboxForm(params: PluginScreenParams, openWorkspace: (workspaceId:
   const listRefs = useRpc(listRefsRpc);
   const createWorkspace = useRpc(createSandboxedWorkspaceRpc);
   const getImageStatus = useRpc(imageStatusRpc);
+  const getRelativeWorktrees = useRpc(relativeWorktreesStatusRpc);
+  const switchToRelativeWorktrees = useRpc(enableRelativeWorktreesRpc);
   const lists = useSandboxLists();
   const [projectId, setProjectId] = useState(params.projectId ?? "");
   const [profileId, setProfileId] = useState<string | null>(null);
@@ -141,17 +147,58 @@ function useSandboxForm(params: PluginScreenParams, openWorkspace: (workspaceId:
         : null,
     [baseRef, isolation, profile, project, title],
   );
+  const checkImageAndCreate = useCallback(
+    (input: NonNullable<ReturnType<typeof request>>) => {
+      imageCheck.mutate(profile ? { profileId: profile.id } : {}, {
+        onSuccess: ({ image, state }) => {
+          if (image && (state === "missing" || state === "outdated")) {
+            setDownload({ image, reason: state });
+          } else create.mutate(input);
+        },
+      });
+    },
+    [create, imageCheck, profile],
+  );
+  // At sandbox paths, the worktree Paseo creates needs relative git links; switching the
+  // repository is the user's call.
+  const relativeCheck = useMutation({ mutationFn: getRelativeWorktrees });
+  const relativeSwitch = useMutation({ mutationFn: switchToRelativeWorktrees });
+  const [relativePaths, setRelativePaths] = useState<RelativeWorktrees | null>(null);
+  const needsRelativeWorktrees =
+    isolation === "worktree" && !!profile && profileSandboxFolder(profile) !== null;
+  const pending =
+    create.isPending || imageCheck.isPending || relativeCheck.isPending || relativeSwitch.isPending;
   const submit = useCallback(() => {
     const input = request();
-    if (!input || create.isPending || imageCheck.isPending) return;
-    imageCheck.mutate(profile ? { profileId: profile.id } : {}, {
-      onSuccess: ({ image, state }) => {
-        if (image && (state === "missing" || state === "outdated")) {
-          setDownload({ image, reason: state });
-        } else create.mutate(input);
+    if (!input || pending) return;
+    if (!needsRelativeWorktrees) {
+      checkImageAndCreate(input);
+      return;
+    }
+    relativeCheck.mutate(
+      { projectId: input.projectId },
+      {
+        onSuccess: (status) => {
+          if (status.state === "relative") checkImageAndCreate(input);
+          else setRelativePaths(status);
+        },
       },
-    });
-  }, [create, imageCheck, profile, request]);
+    );
+  }, [checkImageAndCreate, needsRelativeWorktrees, pending, relativeCheck, request]);
+  const confirmRelativePaths = useCallback(() => {
+    const input = request();
+    if (!input) return;
+    relativeSwitch.mutate(
+      { projectId: input.projectId },
+      {
+        onSuccess: () => {
+          setRelativePaths(null);
+          checkImageAndCreate(input);
+        },
+      },
+    );
+  }, [checkImageAndCreate, relativeSwitch, request]);
+  const cancelRelativePaths = useCallback(() => setRelativePaths(null), []);
   const chooseImage = useCallback(
     (action: ImageChoice["action"]) => {
       const input = request();
@@ -167,8 +214,18 @@ function useSandboxForm(params: PluginScreenParams, openWorkspace: (workspaceId:
 
   return {
     lists,
-    error: create.error ?? imageCheck.error ?? lists.error ?? refs.error,
-    pending: create.isPending || imageCheck.isPending,
+    error:
+      create.error ??
+      imageCheck.error ??
+      relativeCheck.error ??
+      relativeSwitch.error ??
+      lists.error ??
+      refs.error,
+    pending,
+    relativePaths,
+    switchingPaths: relativeSwitch.isPending,
+    confirmRelativePaths,
+    cancelRelativePaths,
     download,
     confirmDownload,
     useLocalImage,
@@ -316,15 +373,9 @@ function SendButton({ theme, form }: { theme: PluginTheme; form: SandboxForm }) 
 }
 
 /** Asks before creating a workspace whose image is missing or older than its registry's. */
-function DownloadConfirmation({ theme, form }: { theme: PluginTheme; form: SandboxForm }) {
-  const { cancelDownload } = form;
-  const openChange = useCallback(
-    (open: boolean) => {
-      if (!open) cancelDownload();
-    },
-    [cancelDownload],
-  );
-  const styles = useMemo(() => {
+/** The confirmation dialogs' text and buttons. */
+function useDialogStyles(theme: PluginTheme) {
+  return useMemo(() => {
     const button = {
       minHeight: 32,
       paddingHorizontal: 14,
@@ -363,6 +414,17 @@ function DownloadConfirmation({ theme, form }: { theme: PluginTheme; form: Sandb
       },
     };
   }, [theme]);
+}
+
+function DownloadConfirmation({ theme, form }: { theme: PluginTheme; form: SandboxForm }) {
+  const { cancelDownload } = form;
+  const openChange = useCallback(
+    (open: boolean) => {
+      if (!open) cancelDownload();
+    },
+    [cancelDownload],
+  );
+  const styles = useDialogStyles(theme);
   const { download } = form;
   const verb = download?.reason === "outdated" ? "update" : "download";
   return (
@@ -410,6 +472,76 @@ function DownloadConfirmation({ theme, form }: { theme: PluginTheme; form: Sandb
               Create workspace and {verb} {download?.image}
             </Text>
           </Pressable>
+        </View>
+      </Modal.Content>
+    </Modal>
+  );
+}
+
+function RelativePathsConfirmation({ theme, form }: { theme: PluginTheme; form: SandboxForm }) {
+  const { cancelRelativePaths, relativePaths } = form;
+  const openChange = useCallback(
+    (open: boolean) => {
+      if (!open) cancelRelativePaths();
+    },
+    [cancelRelativePaths],
+  );
+  const styles = useDialogStyles(theme);
+  const unsupported = relativePaths?.state === "unsupported";
+  return (
+    <Modal
+      title={unsupported ? "Git too old for sandbox paths" : "Switch to relative worktree paths?"}
+      open={relativePaths !== null}
+      onOpenChange={openChange}
+    >
+      <Modal.Content>
+        <Text style={styles.text}>
+          With sandbox paths, the new worktree is placed under the sandbox folder, so its links to
+          the repository must be relative. This repository links its worktrees by absolute path:
+        </Text>
+        <Text style={styles.image} selectable>
+          {form.project?.projectRootPath}
+        </Text>
+        {unsupported ? (
+          <Text style={styles.text}>
+            Relative worktree paths need Git 2.48 or newer, and this host has{" "}
+            {relativePaths?.gitVersion}. Use a profile with host paths, or a sandboxed directory.
+          </Text>
+        ) : (
+          <>
+            <Text style={styles.text}>
+              Switching sets worktree.useRelativePaths and rewrites the links of the repository’s
+              existing worktrees. Git also marks the repository with extensions.relativeWorktrees:
+              Git older than 2.48, in images, on other machines, or in tools with their own Git,
+              then refuses the repository and all its worktrees.
+            </Text>
+            <Text style={styles.muted}>Cancel changes nothing and creates nothing.</Text>
+          </>
+        )}
+        <View style={styles.row}>
+          <Pressable
+            accessibilityRole="button"
+            onPress={cancelRelativePaths}
+            style={styles.cancel}
+            testID="sandbox-relative-cancel"
+          >
+            <Text style={styles.cancelLabel}>Cancel</Text>
+          </Pressable>
+          {unsupported ? null : (
+            <Pressable
+              accessibilityRole="button"
+              onPress={form.confirmRelativePaths}
+              disabled={form.switchingPaths}
+              style={styles.confirm}
+              testID="sandbox-relative-confirm"
+            >
+              <Text style={styles.confirmLabel}>
+                {form.switchingPaths
+                  ? "Switching…"
+                  : "Switch to relative paths and create workspace"}
+              </Text>
+            </Pressable>
+          )}
         </View>
       </Modal.Content>
     </Modal>
@@ -793,6 +925,7 @@ export function NewSandboxedWorkspaceScreen({
         onSaved={editing.saved}
       />
       <DownloadConfirmation theme={theme} form={form} />
+      <RelativePathsConfirmation theme={theme} form={form} />
     </View>
   );
 }

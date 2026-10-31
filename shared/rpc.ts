@@ -4,7 +4,7 @@ import { z } from "zod";
 /**
  * What runs a workspace's sandbox. Podman, Docker, and microsandbox keep one long-lived sandbox per
  * workspace from an image; Bubblewrap starts a fresh one for each launch from the host's
- * own system, read-only.
+ * own system, read-only. A dev container is built from the workspace's own devcontainer.json.
  */
 export const ENGINES = [
   "podman",
@@ -13,6 +13,7 @@ export const ENGINES = [
   "microsandbox",
   "apptainer",
   "singularity",
+  "devcontainer",
 ] as const;
 export const EngineSchema = z.enum(ENGINES);
 export type Engine = z.infer<typeof EngineSchema>;
@@ -24,6 +25,7 @@ const ENGINE_LABELS: Record<Engine, string> = {
   microsandbox: "microsandbox",
   apptainer: "Apptainer",
   singularity: "Singularity",
+  devcontainer: "Dev container",
 };
 
 export type Network = "host" | "bridge" | "none";
@@ -39,6 +41,8 @@ export const ENGINE_NETWORKS: Record<Engine, readonly Network[]> = {
   bubblewrap: ["host", "none"],
   apptainer: ["host", "none"],
   singularity: ["host", "none"],
+  // The workspace's devcontainer.json decides; the profile's network is not used.
+  devcontainer: ["host", "bridge", "none"],
 };
 
 /**
@@ -47,6 +51,72 @@ export const ENGINE_NETWORKS: Record<Engine, readonly Network[]> = {
  */
 export function defaultNetwork(engine: Engine): Network {
   return ENGINE_NETWORKS[engine].includes("bridge") ? "bridge" : "host";
+}
+
+/**
+ * How the agents' own folders reach the sandbox:
+ * - `off`: not at all; agents need credentials from the image, a mount, or a forwarded API key.
+ * - `shared`: your Claude folder and the other agents' folders, read-write at their host paths.
+ * - `isolated`: Claude gets a private folder per workspace, signed in with a copy of your host's
+ *   current access token, with your settings and skills read-only. Other agents have no isolated
+ *   form yet, so their folders are not mounted.
+ */
+export const AGENT_STATES = ["off", "shared", "isolated"] as const;
+export type AgentState = (typeof AGENT_STATES)[number];
+
+/**
+ * A profile's agent state. Profiles from before the choice have `shareAgentState`, where false
+ * meant off and true a private Claude folder.
+ */
+export function profileAgentState(profile: {
+  agentState?: AgentState | undefined;
+  shareAgentState?: boolean | undefined;
+}): AgentState {
+  return profile.agentState ?? (profile.shareAgentState === false ? "off" : "isolated");
+}
+
+/**
+ * A sandbox's agent state. One from before the choice follows the Claude folder its check settled
+ * on: shared when its own mounts made the host's folder writable, isolated otherwise.
+ */
+export function recordAgentState(record: {
+  claudeHome: "private" | "shared" | "checking" | "none";
+  profile: { agentState?: AgentState | undefined; shareAgentState?: boolean | undefined };
+}): AgentState {
+  if (record.profile.agentState) return record.profile.agentState;
+  if (record.claudeHome === "none") return "off";
+  if (record.claudeHome === "shared") return "shared";
+  return profileAgentState(record.profile);
+}
+
+/** The Claude folder a new sandbox gets for each agent state. */
+export const CLAUDE_HOME_FOR: Record<AgentState, "none" | "shared" | "private"> = {
+  off: "none",
+  shared: "shared",
+  isolated: "private",
+};
+
+export const WORKSPACE_PATHS = ["host", "sandbox"] as const;
+export type WorkspacePaths = (typeof WORKSPACE_PATHS)[number];
+
+/** Where dev containers put a workspace: /workspaces/<folder name>. */
+export const DEFAULT_SANDBOX_FOLDER = "/workspaces";
+
+/** The folder a profile places workspaces under inside the sandbox, or null for host paths. */
+export function profileSandboxFolder(profile: {
+  engine: Engine;
+  paths?: WorkspacePaths | undefined;
+  sandboxFolder?: string | undefined;
+}): string | null {
+  // The devcontainer CLI places workspaces under /workspaces itself.
+  if (profile.engine === "devcontainer") return DEFAULT_SANDBOX_FOLDER;
+  if (profile.paths !== "sandbox") return null;
+  return profile.sandboxFolder?.trim() || DEFAULT_SANDBOX_FOLDER;
+}
+
+/** An absolute folder other than /, without `..`, to put workspaces under. */
+export function isValidSandboxFolder(folder: string): boolean {
+  return /^\/./.test(folder) && !folder.split("/").includes("..");
 }
 
 /**
@@ -68,6 +138,8 @@ export const ENGINE_USER_MODES: Record<Engine, readonly UserMode[]> = {
   bubblewrap: ["host"],
   apptainer: ["host"],
   singularity: ["host"],
+  // devcontainer.json names the user (remoteUser), with its own home.
+  devcontainer: ["image"],
 };
 
 export const USER_LABELS: Record<UserMode, string> = {
@@ -86,18 +158,28 @@ export function profileUser(profile: {
   runAsHostUser?: boolean | undefined;
 }): UserMode {
   const user = profile.user ?? (profile.runAsHostUser === false ? "image" : "host");
-  return ENGINE_USER_MODES[profile.engine].includes(user) ? user : "host";
+  const modes = ENGINE_USER_MODES[profile.engine];
+  return modes.includes(user) ? user : modes[0]!;
 }
 
 /** "Podman · node:22", or "Bubblewrap · host system". */
 export function describeProfile(profile: { engine: Engine; image: string }): string {
-  const what = engineUsesImage(profile.engine) ? profile.image : "host system";
+  const what = engineReadsWorkspaceConfig(profile.engine)
+    ? "workspace devcontainer.json"
+    : engineUsesImage(profile.engine)
+      ? profile.image
+      : "host system";
   return `${ENGINE_LABELS[profile.engine]} · ${what}`;
 }
 
 /** Engines that run an image. */
 export function engineUsesImage(engine: Engine): boolean {
-  return engine !== "bubblewrap";
+  return engine !== "bubblewrap" && engine !== "devcontainer";
+}
+
+/** Engines whose sandbox the workspace's own configuration describes, not the profile. */
+export function engineReadsWorkspaceConfig(engine: Engine): boolean {
+  return engine === "devcontainer";
 }
 
 /** The image new profiles start with: Node.js for the npm-installed agent CLIs, on Debian. */
@@ -190,12 +272,25 @@ export const ContainerProfileSchema = z.object({
   user: z.enum(USER_MODES).optional(),
   /** Replaced by `user`: false meant the image's default user. Dropped when the profile is saved. */
   runAsHostUser: z.boolean().optional(),
-  /**
-   * Mount the agents' own folders (~/.codex and the like) and give Claude a private config folder
-   * signed in with your host login, so agents start signed in and Paseo shows their history. When
-   * false, the sandbox gets none of it. Profiles from before this setting share.
-   */
+  /** How the agents' own folders reach the sandbox; read it with profileAgentState. */
+  agentState: z.enum(AGENT_STATES).optional(),
+  /** Replaced by `agentState`: false meant off. Dropped when the profile is saved. */
   shareAgentState: z.boolean().optional(),
+  /**
+   * Where the workspace is inside the sandbox: at its host path, or under `sandboxFolder` as dev
+   * containers place it. Profiles from before this setting use host paths.
+   */
+  paths: z.enum(WORKSPACE_PATHS).optional(),
+  /** With sandbox paths, the folder workspaces go under; /workspaces when empty. */
+  sandboxFolder: z.string().optional(),
+  /** Dev containers: the Docker or Podman command; empty means docker, else podman, on PATH. */
+  containerCli: z.string().optional(),
+  /**
+   * Give agents and terminal profiles the environment the sandbox's login shell sets up, read once
+   * per sandbox. Dev containers follow their devcontainer.json's userEnvProbe instead. Profiles
+   * from before this setting read it.
+   */
+  loginEnvironment: z.boolean().optional(),
 });
 
 export type ContainerProfile = z.infer<typeof ContainerProfileSchema>;
@@ -220,13 +315,12 @@ export const SandboxRecordSchema = z.object({
    */
   pending: z.boolean().optional(),
   /**
-   * `private`: the container gets its own Claude config folder and signs in with the host's
-   * current access token. `shared`: the container's own configuration already makes the host's
-   * folder writable, so it uses that. `checking`: being decided as the sandbox starts. `none`:
-   * the profile shares no agent state, so the sandbox has no Claude folder of the plugin's.
+   * The sandbox's Claude folder, from the profile's agent state when it was created: `private`
+   * (isolated), `shared` (the host's), or `none` (off). `checking` is from before the choice, when
+   * a check at the first start decided; such a sandbox follows its profile now.
    */
   claudeHome: z.enum(["private", "shared", "checking", "none"]),
-  /** Why `claudeHome` was chosen, for the Sandbox panel. */
+  /** From before the choice: why the check decided as it did. No longer shown or written. */
   claudeHomeReason: z.string().optional(),
 });
 
@@ -245,8 +339,12 @@ export type ClaudeLogin = z.infer<typeof ClaudeLoginSchema>;
 
 /** An image download the sandbox needs the user's go-ahead for: missing, or older than its tag's. */
 export const ImageDownloadSchema = z.object({
+  /** The image, or for a dev container, its devcontainer.json. */
   image: z.string(),
-  reason: z.enum(["missing", "outdated"]),
+  /** `devcontainer`: a dev container is about to be created, which may download and build. */
+  reason: z.enum(["missing", "outdated", "devcontainer"]),
+  /** For a dev container: what creating it does, including what reaches the host. */
+  details: z.array(z.string()).optional(),
 });
 
 export type ImageDownload = z.infer<typeof ImageDownloadSchema>;
@@ -360,6 +458,31 @@ export const previewContainerCommandRpc = defineRpc({
   output: z.object({ command: z.string() }),
 });
 
+/**
+ * Whether new worktrees of a project link to their repository by relative path, which sandbox paths
+ * need: `relative` when the repository is set to, `absolute` when not, `unsupported` when the host's
+ * Git is older than 2.48 and cannot.
+ */
+export const RelativeWorktreesSchema = z.object({
+  state: z.enum(["relative", "absolute", "unsupported"]),
+  gitVersion: z.string(),
+});
+
+export type RelativeWorktrees = z.infer<typeof RelativeWorktreesSchema>;
+
+export const relativeWorktreesStatusRpc = defineRpc({
+  name: "sandbox.git.relative-worktrees.status",
+  input: z.object({ projectId: z.string().min(1) }),
+  output: RelativeWorktreesSchema,
+});
+
+/** Switches a project's repository and its existing worktrees to relative paths. */
+export const enableRelativeWorktreesRpc = defineRpc({
+  name: "sandbox.git.relative-worktrees.enable",
+  input: z.object({ projectId: z.string().min(1) }),
+  output: RelativeWorktreesSchema,
+});
+
 /** What the header badge shows: known without inspecting the container. */
 export const SandboxHealthSchema = z.discriminatedUnion("state", [
   /** The sandbox is still starting. */
@@ -388,6 +511,8 @@ export const sandboxStatusRpc = defineRpc({
     claudeLogin: ClaudeLoginSchema,
     /** The Claude config folder the container uses. */
     claudeConfigDir: z.string().nullable(),
+    /** With sandbox paths, the workspace directory inside the sandbox. */
+    sandboxDirectory: z.string().nullable(),
   }),
 });
 

@@ -17,7 +17,9 @@ import {
   listRefsRpc,
   listSandboxesRpc,
   listTerminalProfilesRpc,
+  enableRelativeWorktreesRpc,
   openSandboxShellRpc,
+  relativeWorktreesStatusRpc,
   previewContainerCommandRpc,
   sandboxStatusRpc,
   saveContainerProfileRpc,
@@ -72,6 +74,12 @@ export default function contribute(server: PluginServerContext) {
     const saved = await containerProfiles.save(profile, makeDefault);
     return { ...containerProfiles.snapshot(), saved };
   });
+  server.handle(relativeWorktreesStatusRpc, async ({ projectId }, { paseo }) =>
+    (await resolve(paseo)).relativeWorktrees(projectId, paseo),
+  );
+  server.handle(enableRelativeWorktreesRpc, async ({ projectId }, { paseo }) =>
+    (await resolve(paseo)).enableRelativeWorktrees(projectId, paseo),
+  );
   server.handle(previewContainerCommandRpc, async ({ profile }, { paseo }) => ({
     command: await (await resolve(paseo)).previewCommand(profile),
   }));

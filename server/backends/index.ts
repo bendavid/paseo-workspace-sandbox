@@ -6,6 +6,7 @@ import path from "node:path";
 import type { Engine } from "../../shared/rpc";
 import { isPodman, which, type ContainerPolicy, type ContainerTarget } from "../container";
 import { apptainerBackend } from "./apptainer";
+import { devcontainerBackend } from "./devcontainer";
 import { bubblewrapBackend } from "./bubblewrap";
 import { microsandboxBackend } from "./microsandbox";
 import { ociBackend } from "./oci";
@@ -20,6 +21,7 @@ const BACKENDS: Record<Engine, SandboxBackend> = {
   microsandbox: microsandboxBackend,
   apptainer: apptainerBackend,
   singularity: apptainerBackend,
+  devcontainer: devcontainerBackend,
 };
 
 export const DEFAULT_COMMANDS: Record<Engine, string> = {
@@ -29,6 +31,7 @@ export const DEFAULT_COMMANDS: Record<Engine, string> = {
   microsandbox: "msb",
   apptainer: "apptainer",
   singularity: "singularity",
+  devcontainer: "devcontainer",
 };
 
 // Where the installers put these; a daemon started from a desktop session may not have them on
@@ -63,52 +66,11 @@ export async function resolveEngineCli(engine: Engine, configured?: string): Pro
   return resolved;
 }
 
-export type ClaudeFolderAccess = "writable" | "read-only" | "other" | "absent" | "unknown";
-
-// Prints how the host's Claude folder appears in the sandbox. A marker the host just created tells
-// the host folder apart from one the image, a volume, or a tmpfs puts at the same path; device and
-// inode numbers would not survive a microVM's virtio-fs. Creating a file tests writes through
-// read-only mounts, permissions, and user-namespace mapping alike.
-const CLAUDE_FOLDER_CHECK = [
-  "dir=$1; marker=$2",
-  '[ -d "$dir" ] || { echo absent; exit 0; }',
-  '[ -e "$dir/$marker" ] || { echo other; exit 0; }',
-  'probe="$dir/.paseo-sandbox-write-check-$$"',
-  'if (umask 077; : > "$probe") 2>/dev/null; then rm -f "$probe"; echo writable; else echo read-only; fi',
-].join("\n");
-
 /**
- * Runs the sandbox's configuration (image, engine, workspace and extra mounts, extra run
- * arguments) without any Claude folder of the plugin's, and reports how the host's Claude folder
- * shows. The first run pulls the image, which the sandbox then reuses.
+ * The Docker or Podman command a dev container runs on: the profile's, or docker, or podman. Like
+ * resolveEngineCli, podman-docker's `docker` resolves to podman itself.
  */
-export async function checkClaudeFolder(
-  backend: SandboxBackend,
-  target: ContainerTarget,
-  policy: ContainerPolicy,
-  hostConfigDir: string,
-): Promise<ClaudeFolderAccess> {
-  if (!existsSync(hostConfigDir)) return "absent";
-  const marker = `.paseo-sandbox-check-${randomBytes(6).toString("hex")}`;
-  const markerPath = path.join(hostConfigDir, marker);
-  await writeFile(markerPath, "", { mode: 0o600 });
-  try {
-    const stdout = await backend.runOnce({ ...target, claude: { mode: "none" } }, policy, [
-      "sh",
-      "-c",
-      CLAUDE_FOLDER_CHECK,
-      "sh",
-      hostConfigDir,
-      marker,
-    ]);
-    const answer = stdout.trim().split("\n").pop()?.trim();
-    return answer === "writable" ||
-      answer === "read-only" ||
-      answer === "other" ||
-      answer === "absent"
-      ? answer
-      : "unknown";
-  } finally {
-    await rm(markerPath, { force: true });
-  }
+export async function resolveContainerCli(configured?: string): Promise<string> {
+  if (configured?.trim()) return resolveEngineCli("docker", configured);
+  return resolveEngineCli("docker").catch(() => resolveEngineCli("podman"));
 }
