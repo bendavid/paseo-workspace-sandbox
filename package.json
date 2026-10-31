@@ -1,7 +1,7 @@
 {
   "name": "paseo-workspace-sandbox",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Run a workspace's agents and terminals in a container, microVM, or Bubblewrap sandbox that sees only the folders you choose.",
   "license": "MIT",
   "type": "module",
