@@ -4,7 +4,7 @@ import type { PaseoApi } from "./paseo";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { ClaudeLoginKeeper } from "./claude-login";
 import { prepareClaudeHome } from "./claude-home";
-import { previewCommand } from "./command-preview";
+import { previewCommand, type PreviewWorkspace } from "./command-preview";
 import { backendFor, resolveContainerCli, resolveEngineCli } from "./backends/index";
 import type { ImageStore } from "./backends/types";
 import { checkImage } from "./registry";
@@ -37,6 +37,7 @@ import {
   type ContainerStatus,
   type ImageChoice,
   type ImageDownload,
+  type PreviewContext,
   type RelativeWorktrees,
   type SandboxHealth,
   type SandboxRecord,
@@ -122,6 +123,25 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** At sandbox paths, a worktree's git links must be relative to resolve inside. */
+async function requireRelativeWorktrees(
+  profile: Omit<ContainerProfile, "id">,
+  repositoryRoot: string,
+): Promise<void> {
+  if (!profileSandboxFolder(profile)) return;
+  const { state, gitVersion } = await relativeWorktrees(repositoryRoot);
+  if (state === "unsupported") {
+    throw new Error(
+      `Sandbox paths for worktrees need Git 2.48 or newer; this host has ${gitVersion}`,
+    );
+  }
+  if (state === "absolute") {
+    throw new Error(
+      "Sandbox paths for worktrees need the repository's worktrees to use relative paths",
+    );
+  }
+}
+
 export class SandboxService {
   // In-flight ensureRunning attempts by workspace ID; each resolves to null or why it failed.
   private readonly starting = new Map<string, Promise<string | null>>();
@@ -202,13 +222,43 @@ export class SandboxService {
   }
 
   /** The command a sandbox from this profile starts with; see previewCommand. */
-  async previewCommand(profile: Omit<ContainerProfile, "id">): Promise<string> {
+  async previewCommand(
+    profile: Omit<ContainerProfile, "id">,
+    context: PreviewContext | undefined,
+    paseo: PaseoApi,
+  ): Promise<string> {
     return previewCommand({
       policy: await this.policy(profile),
       image: profile.image,
-      hostConfigDir: this.login.hostConfigDir,
       sandboxFolder: profileSandboxFolder(profile),
+      workspace: await this.previewWorkspace(context, paseo),
+      paths: {
+        hostConfigDir: this.login.hostConfigDir,
+        signInDir: this.login.directory,
+        claudeHomeDir: (workspaceId) => this.store.claudeHomeDir(workspaceId),
+        linkPath: (workspaceId) => this.store.linkPath(workspaceId),
+      },
     });
+  }
+
+  private async previewWorkspace(
+    context: PreviewContext | undefined,
+    paseo: PaseoApi,
+  ): Promise<PreviewWorkspace> {
+    if (context?.kind === "sandbox") {
+      const record = this.store.get(context.workspaceId);
+      return record && !record.pending ? { kind: "sandbox", record } : { kind: "generic" };
+    }
+    if (context?.kind === "new") {
+      const project = await this.project(context.projectId, paseo);
+      return {
+        kind: "new",
+        projectRoot: project.projectRootPath,
+        // A project without Git gets a sandboxed directory, whatever the form held.
+        isolation: project.projectKind === "git" ? context.isolation : "directory",
+      };
+    }
+    return { kind: "generic" };
   }
 
   /** What `sandbox-run` sources to join a workspace's sandbox; see its contract in wrapper.ts. */
@@ -423,19 +473,7 @@ export class SandboxService {
       );
     }
     // Paseo creates the worktree; at sandbox paths its git links must be relative to resolve.
-    if (isolation === "worktree" && profileSandboxFolder(profile)) {
-      const { state, gitVersion } = await relativeWorktrees(project.projectRootPath);
-      if (state === "unsupported") {
-        throw new Error(
-          `Sandbox paths for worktrees need Git 2.48 or newer; this host has ${gitVersion}`,
-        );
-      }
-      if (state === "absolute") {
-        throw new Error(
-          "Sandbox paths for worktrees need the repository's worktrees to use relative paths",
-        );
-      }
-    }
+    if (isolation === "worktree") await requireRelativeWorktrees(profile, project.projectRootPath);
     return { profile, project, isolation, policy };
   }
 
@@ -523,6 +561,71 @@ export class SandboxService {
     this.imageChoices.set(workspaceId, choice);
     // A download outlasts an RPC; the status reports its progress.
     void this.ensureRunning(workspaceId);
+  }
+
+  /**
+   * Stops a persistent sandbox and starts it again, as it is. Running agents and terminals in it
+   * stop.
+   */
+  async restart(workspaceId: string): Promise<void> {
+    const record = this.settled(workspaceId);
+    await this.starting.get(workspaceId);
+    const policy = await this.recordPolicy(record);
+    const backend = backendFor(policy.engine);
+    if (!backend.stop) {
+      throw new Error(
+        "This engine starts a fresh sandbox for every launch; there is nothing to restart",
+      );
+    }
+    await backend.stop(workspaceTarget(record, { mode: "none" }), policy);
+    this.failures.delete(workspaceId);
+    void this.ensureRunning(workspaceId);
+  }
+
+  /**
+   * Removes a sandbox and creates it again, from its own copy of a profile, or from other settings,
+   * which become its copy. The captured login shell environment is read again. An engine that
+   * starts a fresh sandbox per launch has nothing to remove: new launches use the settings.
+   */
+  async recreate(
+    workspaceId: string,
+    input: (Omit<ContainerProfile, "id"> & { id?: string }) | undefined,
+    paseo: PaseoApi,
+  ): Promise<void> {
+    const record = this.settled(workspaceId);
+    await this.starting.get(workspaceId);
+    const profile = input
+      ? this.containerProfiles.normalize({ ...input, id: input.id ?? record.profile.id })
+      : record.profile;
+    if (input && !record.linkedDirectory) {
+      await requireRelativeWorktrees(
+        profile,
+        (await this.gitProject(record.projectId, paseo)).projectRootPath,
+      );
+    }
+    const policy = await this.recordPolicy(record);
+    await backendFor(policy.engine).remove(workspaceTarget(record, { mode: "none" }), policy);
+    await this.store.forgetEnvironment(workspaceId);
+    const agentState = profileAgentState(profile);
+    const { claudeHomeReason: _reason, ...rest } = record;
+    const updated: SandboxRecord = {
+      ...rest,
+      profile,
+      // Same agent state, same folder: a sandbox from before the choice keeps what it had.
+      claudeHome:
+        agentState === recordAgentState(record) ? record.claudeHome : CLAUDE_HOME_FOR[agentState],
+    };
+    await this.store.put(updated);
+    this.failures.delete(workspaceId);
+    void this.ensureRunning(workspaceId);
+  }
+
+  /** A sandbox that exists and has finished being created. */
+  private settled(workspaceId: string): SandboxRecord {
+    const record = this.store.get(workspaceId);
+    if (!record) throw new Error("This workspace is not sandboxed");
+    if (record.pending) throw new Error("The sandbox is still being created");
+    return record;
   }
 
   /** Every sandbox with its health, from what this process knows: no container is inspected. */

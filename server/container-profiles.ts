@@ -88,6 +88,20 @@ export class ContainerProfiles {
     input: Omit<ContainerProfile, "id"> & { id?: string },
     makeDefault: boolean,
   ): Promise<ContainerProfile> {
+    const profile = this.normalize(input);
+    const index = this.profiles.findIndex((candidate) => candidate.id === profile.id);
+    if (index === -1) this.profiles.push(profile);
+    else this.profiles[index] = profile;
+    if (makeDefault) this.defaultProfileId = profile.id;
+    await this.persist();
+    return profile;
+  }
+
+  /**
+   * Validates settings and stores them as a profile is stored: old fields replaced by what they
+   * meant, and an ID. A sandbox's own copy is checked the same way when it is changed.
+   */
+  normalize(input: Omit<ContainerProfile, "id"> & { id?: string }): ContainerProfile {
     if (engineUsesImage(input.engine) && !isValidImage(input.engine, input.image)) {
       throw new Error(input.image ? imageHint(input.engine) : `${input.engine} needs an image`);
     }
@@ -105,18 +119,12 @@ export class ContainerProfiles {
     // Throws on unbalanced quotes, which would otherwise fail only when a sandbox starts.
     splitArguments(input.extraRunArgs);
     const { runAsHostUser: _legacyUser, shareAgentState: _legacyState, ...rest } = input;
-    const profile: ContainerProfile = {
+    return {
       ...rest,
       user: profileUser(input),
       agentState: profileAgentState(input),
       id: input.id ?? `profile-${randomUUID().slice(0, 8)}`,
     };
-    const index = this.profiles.findIndex((candidate) => candidate.id === profile.id);
-    if (index === -1) this.profiles.push(profile);
-    else this.profiles[index] = profile;
-    if (makeDefault) this.defaultProfileId = profile.id;
-    await this.persist();
-    return profile;
   }
 
   async delete(id: string): Promise<void> {

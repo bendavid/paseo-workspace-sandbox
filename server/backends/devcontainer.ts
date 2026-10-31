@@ -359,6 +359,12 @@ export const devcontainerBackend: SandboxBackend = {
     return existing.running ? { state: "running" } : { state: "stopped" };
   },
 
+  async stop(target, policy) {
+    const existing = await findContainer(target, policy);
+    if (existing?.running)
+      await runCli(containerCli(policy), ["stop", existing.id], { long: true });
+  },
+
   async remove(target, policy) {
     const existing = await findContainer(target, policy);
     if (existing) await runCli(containerCli(policy), ["rm", "-f", existing.id]);

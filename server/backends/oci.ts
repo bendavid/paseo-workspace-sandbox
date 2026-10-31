@@ -75,6 +75,8 @@ async function containerOptions(
   resolved: Mount[],
 ): Promise<string[]> {
   const user = userInfo();
+  // A Docker profile may run on podman-docker, which resolves to Podman itself.
+  const podman = policy.engine === "podman" || (await isPodman(policy.cli));
   // As you, files the container writes keep your ownership: Podman maps your uid into its
   // namespace, Docker runs the process as your uid. Otherwise the image's default user runs.
   // keep-id alone drops your supplementary groups, so files you reach through a group (a team's
@@ -86,7 +88,7 @@ async function containerOptions(
       resolved.map((mount) => mount.path),
     );
   } else if (policy.user === "host") {
-    identity = (await isPodman(policy.cli))
+    identity = podman
       ? ["--userns=keep-id", "--group-add", "keep-groups"]
       : ["--user", `${user.uid}:${user.gid}`];
   }
@@ -98,7 +100,9 @@ async function containerOptions(
     // Images download only through `pull`, after the user agreed; see ImageStore.
     "--pull=never",
     "--network",
-    policy.network,
+    // Podman's private is a namespace of its own whichever way it runs: pasta or slirp4netns
+    // rootless, the bridge as root, which a rootless Podman can't join.
+    podman && policy.network === "bridge" ? "private" : policy.network,
     ...identity,
     "--workdir",
     target.workdir,
@@ -214,6 +218,11 @@ export const ociBackend: SandboxBackend = {
   },
 
   status: (target, policy) => inspect(policy.cli, target.container),
+
+  async stop(target, policy) {
+    if ((await inspect(policy.cli, target.container)).state !== "running") return;
+    await runCli(policy.cli, ["stop", target.container], { long: true });
+  },
 
   async remove(target, policy) {
     try {

@@ -173,7 +173,7 @@ export async function runCli(
 }
 
 /** The repository's shared git directory and this checkout's own, or null outside git. */
-async function gitDirectories(cwd: string): Promise<{ common: string; own: string } | null> {
+export async function gitDirectories(cwd: string): Promise<{ common: string; own: string } | null> {
   try {
     const { stdout } = await execCommand("git", [
       "-C",
@@ -212,10 +212,16 @@ export function parseExtraMounts(value: string): Mount[] {
  * links would show the link there as a symlink, which engines follow at a mount's destination; the
  * sandbox's own folder of mount points, mounted over it, prevents that.
  */
-async function linkedDirectoryMounts(link: string, directory: string): Promise<Mount[]> {
+async function linkedDirectoryMounts(
+  link: string,
+  directory: string,
+  options: LayoutOptions,
+): Promise<Mount[]> {
   const mountPoints = linkMountPoints(link);
-  await mkdir(path.join(mountPoints, path.basename(link)), { recursive: true });
-  await ensureLink(link, directory);
+  if (!options.preview) {
+    await mkdir(path.join(mountPoints, path.basename(link)), { recursive: true });
+    await ensureLink(link, directory);
+  }
   return [
     { path: path.dirname(link), source: mountPoints, readOnly: true },
     { path: link, source: directory, readOnly: false },
@@ -231,7 +237,11 @@ async function ensureLink(link: string, directory: string): Promise<void> {
 type GitDirectories = NonNullable<Awaited<ReturnType<typeof gitDirectories>>>;
 
 /** The workspace and its git metadata, at their host paths. */
-async function workspaceMounts(cwd: string, git: GitDirectories | null): Promise<Mount[]> {
+async function workspaceMounts(
+  cwd: string,
+  git: GitDirectories | null,
+  options: LayoutOptions = {},
+): Promise<Mount[]> {
   const mounts: Mount[] = [{ path: cwd, readOnly: false }];
   if (git) {
     const { common: commonDir, own } = git;
@@ -248,7 +258,7 @@ async function workspaceMounts(cwd: string, git: GitDirectories | null): Promise
       }
     }
     const hooks = path.join(commonDir, "hooks");
-    await mkdir(hooks, { recursive: true });
+    if (!options.preview) await mkdir(hooks, { recursive: true });
     mounts.push({ path: hooks, readOnly: true });
     const config = path.join(commonDir, "config");
     if (existsSync(config)) mounts.push({ path: config, readOnly: true });
@@ -278,16 +288,27 @@ export class AbsoluteWorktreeError extends Error {
  * The workspace's mounts, at host paths or under the sandbox folder. A sandboxed directory gets
  * `<folder>/<name>`, without the link handling host paths need; a worktree keeps its git metadata.
  */
-export async function workspaceLayout(target: ContainerTarget): Promise<WorkspaceLayout> {
+/**
+ * `preview`: for the profile editor's start command, with nothing created on disk, and a worktree
+ * whose links are still absolute placed as it will be once they are relative.
+ */
+export interface LayoutOptions {
+  preview?: boolean;
+}
+
+export async function workspaceLayout(
+  target: ContainerTarget,
+  options: LayoutOptions = {},
+): Promise<WorkspaceLayout> {
   const folder = target.sandboxFolder;
   if (target.linkedDirectory) {
     if (!folder) {
       return {
         workdir: target.workspace,
-        mounts: await linkedDirectoryMounts(target.workspace, target.linkedDirectory),
+        mounts: await linkedDirectoryMounts(target.workspace, target.linkedDirectory, options),
       };
     }
-    await ensureLink(target.workspace, target.linkedDirectory);
+    if (!options.preview) await ensureLink(target.workspace, target.linkedDirectory);
     const workdir = path.posix.join(folder, path.basename(target.linkedDirectory));
     return {
       workdir,
@@ -296,7 +317,10 @@ export async function workspaceLayout(target: ContainerTarget): Promise<Workspac
   }
   if (!folder) {
     const git = await gitDirectories(target.workspace);
-    return { workdir: target.workspace, mounts: await workspaceMounts(target.workspace, git) };
+    return {
+      workdir: target.workspace,
+      mounts: await workspaceMounts(target.workspace, git, options),
+    };
   }
   // Real paths, so the folders in common and the git links agree with what is on disk.
   const workspace = await realpath(target.workspace);
@@ -304,11 +328,11 @@ export async function workspaceLayout(target: ContainerTarget): Promise<Workspac
   const git = found
     ? { common: await realpath(found.common), own: await realpath(found.own) }
     : null;
-  const translate = translator(await sandboxPrefixes(workspace, folder, git));
+  const translate = translator(await sandboxPrefixes(workspace, folder, git, options));
   const worktree = git && !git.common.startsWith(`${workspace}${path.sep}`);
   return {
     workdir: translate(workspace),
-    mounts: (await workspaceMounts(workspace, git)).map((mount) => ({
+    mounts: (await workspaceMounts(workspace, git, options)).map((mount) => ({
       path: translate(mount.path),
       source: mount.source ?? mount.path,
       readOnly: mount.readOnly,
@@ -327,13 +351,16 @@ async function sandboxPrefixes(
   workspace: string,
   folder: string,
   git: GitDirectories | null,
+  options: LayoutOptions = {},
 ): Promise<Array<[string, string]>> {
   if (!git || git.common.startsWith(`${workspace}${path.sep}`)) {
     return [[workspace, path.posix.join(folder, path.basename(workspace))]];
   }
   const dotGit = await readFile(path.join(workspace, ".git"), "utf8").catch(() => "");
-  const link = /^gitdir:\s*(.+)$/m.exec(dotGit)?.[1]?.trim();
-  if (!link || path.isAbsolute(link)) throw new AbsoluteWorktreeError(workspace);
+  const found = /^gitdir:\s*(.+)$/m.exec(dotGit)?.[1]?.trim();
+  const relative = found && !path.isAbsolute(found);
+  if (!relative && !options.preview) throw new AbsoluteWorktreeError(workspace);
+  const link = relative ? found : path.relative(workspace, git.own);
   const segments: string[] = [];
   for (
     let current = workspace;

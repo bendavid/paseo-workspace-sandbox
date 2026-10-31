@@ -102,6 +102,11 @@ export class SandboxStore {
     return record;
   }
 
+  /** Forgets a sandbox's captured login shell environment, so the next launch captures it. */
+  async forgetEnvironment(workspaceId: string): Promise<void> {
+    await rm(environmentFile(this.specFile(workspaceId)), { force: true });
+  }
+
   /**
    * Whether the workspace had a sandbox that is gone, such as an archived workspace. Its private
    * Claude folder outlives the sandbox and counts too, for sandboxes removed before the plugin

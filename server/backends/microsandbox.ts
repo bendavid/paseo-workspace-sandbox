@@ -152,6 +152,11 @@ export const microsandboxBackend: SandboxBackend = {
 
   status: (target, policy) => inspect(policy.cli, target.container),
 
+  async stop(target, policy) {
+    if ((await inspect(policy.cli, target.container)).state !== "running") return;
+    await runCli(policy.cli, ["stop", target.container], { long: true });
+  },
+
   async remove(target, policy) {
     if ((await inspect(policy.cli, target.container)).state === "missing") return;
     await runCli(policy.cli, ["rm", "--force", target.container]);

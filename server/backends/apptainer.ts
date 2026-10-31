@@ -78,8 +78,6 @@ function containerArguments(policy: ContainerPolicy, mounts: Mount[]): string[] 
     // No automatic mounts of your home, the working directory, or /tmp; private /dev, PID, and IPC.
     "--containall",
     "--cleanenv",
-    // The image is read-only; this gives each launch a writable layer over it.
-    "--writable-tmpfs",
     ...(policy.network === "none" ? ["--net", "--network", "none"] : []),
     ...mounts.flatMap((mount) => [
       "--bind",

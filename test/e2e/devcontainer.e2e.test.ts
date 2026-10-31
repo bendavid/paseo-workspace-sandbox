@@ -165,6 +165,11 @@ test.skipIf(!devcontainer || !imageHere || !supportsRelativeWorktrees(hostGit))(
         { cwd: worktree, env: { ...process.env, PASEO_WORKSPACE_ID: "wks_e2e" } },
       );
       expect(probed.stdout.trim()).toBe("profile=1");
+      // A restart starts the same container again, without devcontainer up.
+      await backend.stop!(target, policy);
+      expect(await backend.status(target, policy)).toEqual({ state: "stopped" });
+      await backend.start(target, policy);
+      expect(await backend.status(target, policy)).toEqual({ state: "running" });
     } finally {
       await backend.remove(target, policy).catch(() => undefined);
       if (built?.includes("vsc-")) await run(podman!, ["rmi", built]).catch(() => undefined);

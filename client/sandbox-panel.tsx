@@ -1,18 +1,25 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRpc, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
+import type { PluginTheme } from "@getpaseo/plugin";
 import {
   Loading,
+  Modal,
   ScrollView,
   SettingsAction,
   SettingsCard,
   SettingsRow,
   SettingsSection,
+  SettingsSelect,
 } from "@getpaseo/plugin/client/ui";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Text } from "react-native";
 import {
   chooseImageRpc,
   describeProfile,
+  enginePersistent,
+  listContainerProfilesRpc,
+  restartSandboxRpc,
+  type SandboxRecord,
   engineReadsWorkspaceConfig,
   profileSandboxFolder,
   recordAgentState,
@@ -26,6 +33,8 @@ import {
   type ImageChoice,
   type ImageDownload,
 } from "../shared/rpc";
+import { ProfileEditor, type ProfileEditorTarget } from "./profile-editor";
+import { RecreateAction } from "./recreate";
 
 function describe(container: ContainerStatus): string {
   switch (container.state) {
@@ -136,6 +145,108 @@ function ImageDownloadAction({
         />
       ) : null}
     </SettingsCard>
+  );
+}
+
+/** Choosing a saved profile to recreate the sandbox with, then the go-ahead. */
+function SavedProfileRecreate({ sandbox, onDone }: { sandbox: SandboxRecord; onDone(): void }) {
+  const listProfiles = useRpc(listContainerProfilesRpc);
+  const profiles = useQuery({ queryKey: ["container-profiles"], queryFn: () => listProfiles({}) });
+  const [chosen, setChosen] = useState<string | null>(null);
+  if (!profiles.data) return <Loading />;
+  const options = profiles.data.profiles.map((profile) => ({
+    label: profile.name,
+    value: profile.id,
+  }));
+  const profile =
+    profiles.data.profiles.find((candidate) => candidate.id === chosen) ??
+    profiles.data.profiles.find((candidate) => candidate.id === profiles.data.defaultId);
+  return (
+    <>
+      <SettingsCard>
+        <SettingsSelect
+          label="Profile"
+          hint={profile ? describeProfile(profile) : undefined}
+          value={profile?.id ?? ""}
+          options={options}
+          onValueChange={setChosen}
+        />
+      </SettingsCard>
+      {profile ? (
+        <RecreateAction key={profile.id} sandbox={sandbox} next={profile} onDone={onDone} />
+      ) : null}
+    </>
+  );
+}
+
+type ManageDialog = "recreate" | "profile" | null;
+
+/** Restart, recreate, and changing the sandbox's settings, as its engine allows. */
+function ManageSandbox({ sandbox, theme }: { sandbox: SandboxRecord; theme: PluginTheme }) {
+  const queryClient = useQueryClient();
+  const restartSandbox = useRpc(restartSandboxRpc);
+  const refresh = useCallback(
+    () => queryClient.invalidateQueries({ queryKey: ["status", sandbox.workspaceId] }),
+    [queryClient, sandbox.workspaceId],
+  );
+  const restart = useMutation({ mutationFn: restartSandbox, onSettled: refresh });
+  const [dialog, setDialog] = useState<ManageDialog>(null);
+  const [editing, setEditing] = useState<ProfileEditorTarget | null>(null);
+  const close = useCallback(() => {
+    setDialog(null);
+    setEditing(null);
+    void refresh();
+  }, [refresh]);
+  const openChange = useCallback((open: boolean) => {
+    if (!open) setDialog(null);
+  }, []);
+  const persistent = enginePersistent(sandbox.profile.engine);
+  return (
+    <SettingsSection title="Manage">
+      <SettingsCard>
+        {persistent ? (
+          <SettingsAction
+            label="Restart"
+            hint="Stops the container and starts it again as it is; running agents and terminals in it stop"
+            actionLabel={restart.isPending ? "Restarting…" : "Restart"}
+            onPress={() => restart.mutate({ workspaceId: sandbox.workspaceId })}
+            disabled={restart.isPending}
+            error={restart.error?.message ?? null}
+          />
+        ) : null}
+        {persistent ? (
+          <SettingsAction
+            label="Recreate"
+            hint="Removes the container and creates it again from the sandbox's settings"
+            actionLabel="Recreate…"
+            onPress={() => setDialog("recreate")}
+          />
+        ) : null}
+        <SettingsAction
+          label="Change settings"
+          hint="Edit the sandbox's own copy of its profile, then recreate it with the changes"
+          actionLabel="Edit…"
+          onPress={() => setEditing({ mode: "sandbox", sandbox })}
+        />
+        <SettingsAction
+          label="Use another profile"
+          hint="Recreate the sandbox with a copy of a saved profile"
+          actionLabel="Choose…"
+          onPress={() => setDialog("profile")}
+        />
+      </SettingsCard>
+      <Modal
+        title={dialog === "profile" ? "Use another profile" : "Recreate the sandbox?"}
+        open={dialog !== null}
+        onOpenChange={openChange}
+      >
+        <Modal.Content>
+          {dialog === "recreate" ? <RecreateAction sandbox={sandbox} onDone={close} /> : null}
+          {dialog === "profile" ? <SavedProfileRecreate sandbox={sandbox} onDone={close} /> : null}
+        </Modal.Content>
+      </Modal>
+      <ProfileEditor target={editing} theme={theme} onClose={close} onSaved={close} />
+    </SettingsSection>
   );
 }
 
@@ -288,6 +399,7 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
           />
         </SettingsCard>
       </SettingsSection>
+      <ManageSandbox sandbox={sandbox} theme={theme} />
       <Text style={styles.detail}>
         Scripts, worktree setup, and terminals opened from the tab bar run on the host. Use Open
         sandboxed terminal for commands that should stay inside the container.

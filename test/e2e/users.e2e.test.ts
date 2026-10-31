@@ -139,6 +139,11 @@ describe.each(ENGINES)("the user in a %s sandbox", (engine) => {
           const codex = providerDirectories().find((directory) => directory.endsWith("/.codex"));
           if (codex) expect(report.codex).toBe(agentState === "shared" ? codex : "");
         }
+        // A restart stops the sandbox and starts the same one again.
+        await backend.stop!(target, policy);
+        expect(await backend.status(target, policy)).toEqual({ state: "stopped" });
+        await backend.start(target, policy);
+        expect(await backend.status(target, policy)).toEqual({ state: "running" });
       } finally {
         await backend.remove(target, policy).catch(() => undefined);
       }

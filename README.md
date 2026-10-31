@@ -51,20 +51,40 @@ and extra run arguments. A new workspace copies the profile chosen in the form, 
 deleting a profile never changes an existing sandbox; the Sandbox panel shows the copy. The form's
 **Container** dropdown has **New profile** (prefilled from the selected one) and **Edit**, and
 Settings > Sandbox lists the profiles. The profile editor shows the **Start command** the
-settings produce, built by the same code that starts sandboxes, with placeholders such as
-`<workspace>` for what each workspace fills in. The first profile uses Podman, or Docker when only Docker is
+settings produce, built by the same code that starts sandboxes. Opened from the form it shows the
+chosen project's real paths, for a worktree or a sandboxed directory as chosen; from the Sandbox
+panel, that sandbox's own paths and name; from Settings, a plain checkout. Placeholders such as
+`<worktree>` or `<workspace-id>` stand for what creating the workspace decides. The first profile uses Podman, or Docker when only Docker is
 installed, with a separate network. Profiles live in `container-profiles.json` in the plugin's data
 folder.
 
+The Sandbox panel's **Manage** section changes a workspace's own sandbox:
+
+- **Restart** stops the container or microVM and starts the same one again. **Recreate** removes it
+  and creates it from the sandbox's settings again, with the usual image check or dev container
+  go-ahead, and reads the login shell environment again; anything installed in it outside its
+  mounts is lost. Both stop running agents and
+  terminals in it. Engines that start a fresh sandbox per launch have neither.
+- **Change settings** edits the sandbox's own copy of its profile, and **Use another profile**
+  replaces it with a copy of a saved one; either recreates the sandbox, or for a per-launch engine
+  applies to new launches. Before you go ahead, the panel lists what the change does to what
+  already ran: a new workspace path inside the sandbox (agents' recorded paths and sessions refer
+  to the old one, so resuming them may fail), another Claude folder (earlier Claude agents can't
+  resume, and Paseo may not show their history), other agents' folders no longer mounted, or
+  another user owning what the sandbox writes. Moving a worktree to sandbox paths offers to switch
+  the repository to relative worktree paths first.
+
 | Engine                  | Sandbox                          | Image            | Network: Host / Separate / None                     | Tested                                  |
 | ----------------------- | -------------------------------- | ---------------- | --------------------------------------------------- | --------------------------------------- |
-| Podman                  | One container per workspace      | Yes              | `--network host` / `bridge` / `none`                | Yes                                     |
-| Docker                  | One container per workspace      | Yes              | as Podman                                           | Through podman-docker                   |
+| Podman                  | One container per workspace      | Yes              | `--network host` / `private` / `none`               | Yes                                     |
+| Docker                  | One container per workspace      | Yes              | `--network host` / `bridge` / `none`                | Through podman-docker                   |
 | Bubblewrap              | One namespace sandbox per launch | No               | host network / not offered / `--unshare-net`        | Yes                                     |
 | microsandbox            | One microVM per workspace        | Yes              | `--net all` / `--net public` / `--no-net`           | Yes (0.7.11)                            |
 | Apptainer / Singularity | One container per launch         | Yes, or a `.sif` | host network / not offered / `--net --network none` | Apptainer 1.5.4 (also as `singularity`) |
 
-New profiles default to **Separate** where the engine has it, and otherwise to **Host**.
+New profiles default to **Separate** where the engine has it, and otherwise to **Host**. Podman's
+Separate is `--network private`, a network namespace of the container's own whether Podman runs
+rootless (pasta or slirp4netns) or as root (the bridge); Docker's is `bridge`.
 Bubblewrap, Apptainer, and Singularity have no separate network without root, so they offer only
 Host and None.
 
@@ -93,9 +113,10 @@ spaces, as in `--sysctl "net.ipv4.ping_group_range=1000 1000"`.
   variables are passed as `-e NAME`, which keeps their values off its command line. libkrun does not
   strictly confine a guest to a shared folder's subtree, so share narrow folders.
 - **Apptainer and Singularity** start a fresh container per launch, like Bubblewrap, with
-  `apptainer exec --containall --cleanenv --writable-tmpfs`: no automatic mounts of your home,
-  the working directory, or `/tmp`, none of the daemon's environment, and a writable layer over the
-  read-only image for the launch. They run as you and add your account to the container's
+  `apptainer exec --containall --cleanenv`: no automatic mounts of your home, the working
+  directory, or `/tmp`, and none of the daemon's environment. The image stays read-only; add
+  `--writable-tmpfs` under extra run arguments for a writable layer over it for each launch. They
+  run as you and add your account to the container's
   `/etc/passwd` themselves, so there is no User setting; the home directory is a
   scratch folder for the launch unless a mount covers it. The image is a full registry reference,
   pulled with `apptainer pull` into `images/` in the plugin's data folder after you agree, with the

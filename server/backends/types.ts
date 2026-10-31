@@ -57,6 +57,8 @@ export interface SandboxBackend {
   creationConsent?(target: ContainerTarget, policy: ContainerPolicy): Promise<ImageDownload | null>;
   /** Engines that place the workspace themselves: its directory inside, once known. */
   workspaceFolder?(target: ContainerTarget): Promise<string | null>;
+  /** A persistent sandbox's stop, keeping it for the next start; nothing when not running. */
+  stop?(target: ContainerTarget, policy: ContainerPolicy): Promise<void>;
   /** Makes the sandbox ready: starts or recreates a persistent one. */
   start(target: ContainerTarget, policy: ContainerPolicy): Promise<void>;
   status(target: ContainerTarget, policy: ContainerPolicy): Promise<ContainerStatus>;

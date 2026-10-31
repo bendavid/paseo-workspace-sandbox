@@ -921,6 +921,11 @@ export function NewSandboxedWorkspaceScreen({
       <ProfileEditor
         target={editing.target}
         theme={theme}
+        workspace={
+          form.project
+            ? { kind: "new", projectId: form.project.projectId, isolation: form.isolation }
+            : undefined
+        }
         onClose={editing.close}
         onSaved={editing.saved}
       />

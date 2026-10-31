@@ -6,6 +6,7 @@ import { ContainerProfiles } from "../server/container-profiles";
 import {
   DEFAULT_IMAGE,
   profileAgentState,
+  profileChangeWarnings,
   profileSandboxFolder,
   profileUser,
   recordAgentState,
@@ -195,4 +196,37 @@ test("reads the agent state, including profiles and sandboxes from before the ch
   );
   expect(saved).toMatchObject({ agentState: "off" });
   expect(saved).not.toHaveProperty("shareAgentState");
+});
+
+test("warns what recreating with other settings changes for what already ran", () => {
+  const profile = {
+    id: "p",
+    name: "P",
+    engine: "podman",
+    image: DEFAULT_IMAGE,
+    network: "bridge",
+    extraMounts: "",
+    extraRunArgs: "",
+    agentState: "shared",
+  } as const;
+  const sandbox = { profile, claudeHome: "shared" } as const;
+  expect(profileChangeWarnings(sandbox, { ...profile, network: "none" })).toEqual([]);
+  const warnings = profileChangeWarnings(sandbox, {
+    ...profile,
+    paths: "sandbox",
+    agentState: "isolated",
+    user: "image",
+  });
+  expect(warnings).toHaveLength(4);
+  expect(warnings[0]).toMatch(
+    /^The workspace's path inside the sandbox changes from its host path to a place under \/workspaces:/,
+  );
+  expect(warnings[1]).toMatch(
+    /^Claude moves from your host Claude folder to its private Claude folder/,
+  );
+  expect(warnings[2]).toMatch(/other agents' folders are no longer mounted/);
+  expect(warnings[3]).toMatch(/^The user changes from Host user to Image default user/);
+  expect(profileChangeWarnings(sandbox, { ...profile, engine: "bubblewrap" })[0]).toBe(
+    "The engine changes from Podman to Bubblewrap",
+  );
 });

@@ -13,6 +13,7 @@ import {
 } from "@getpaseo/plugin/client/ui";
 import { useCallback, useMemo, useState } from "react";
 import { Text, View } from "react-native";
+import { RecreateAction } from "./recreate";
 import { FONT } from "./standard-ui";
 import {
   DEFAULT_IMAGE,
@@ -27,12 +28,15 @@ import {
   isValidImage,
   previewContainerCommandRpc,
   profileAgentState,
+  recordAgentState,
   profileUser,
   saveContainerProfileRpc,
   type AgentState,
   type ContainerProfile,
   type Engine,
+  type SandboxRecord,
   type Network,
+  type PreviewContext,
   USER_LABELS,
   type UserMode,
   type WorkspacePaths,
@@ -151,11 +155,15 @@ const BLANK: Omit<ContainerProfile, "id"> = {
 
 export type ProfileEditorTarget =
   | { mode: "new"; from?: ContainerProfile }
-  | { mode: "edit"; profile: ContainerProfile; isDefault: boolean; canDelete: boolean };
+  | { mode: "edit"; profile: ContainerProfile; isDefault: boolean; canDelete: boolean }
+  /** A sandbox's own copy, applied by recreating the sandbox rather than saved as a profile. */
+  | { mode: "sandbox"; sandbox: SandboxRecord };
 
 interface ProfileEditorProps {
   target: ProfileEditorTarget | null;
   theme: PluginTheme;
+  /** The new workspace the form is for, so the start command shows its paths. */
+  workspace?: PreviewContext;
   onClose(): void;
   /** Called with the saved profile, or null after a delete. */
   onSaved(profile: ContainerProfile | null): void;
@@ -185,10 +193,15 @@ function fields(profile: ContainerProfile): Draft {
 function initialDraft(target: ProfileEditorTarget | null): Draft {
   if (!target) return BLANK;
   if (target.mode === "edit") return fields(target.profile);
+  if (target.mode === "sandbox") {
+    // A sandbox from before the agent state choice shows the state its Claude folder has.
+    return { ...fields(target.sandbox.profile), agentState: recordAgentState(target.sandbox) };
+  }
   return target.from ? { ...fields(target.from), name: `${target.from.name} copy` } : BLANK;
 }
 
 function targetKey(target: ProfileEditorTarget): string {
+  if (target.mode === "sandbox") return `sandbox:${target.sandbox.workspaceId}`;
   return target.mode === "edit" ? `edit:${target.profile.id}` : `new:${target.from?.id ?? ""}`;
 }
 
@@ -196,7 +209,7 @@ function targetKey(target: ProfileEditorTarget): string {
  * Adds or edits a saved container profile. Workspaces copy a profile when they are created, so
  * saving here never changes an existing workspace's container.
  */
-export function ProfileEditor({ target, theme, onClose, onSaved }: ProfileEditorProps) {
+export function ProfileEditor({ target, theme, workspace, onClose, onSaved }: ProfileEditorProps) {
   const openChange = useCallback(
     (open: boolean) => {
       if (!open) onClose();
@@ -205,29 +218,61 @@ export function ProfileEditor({ target, theme, onClose, onSaved }: ProfileEditor
   );
   return (
     <Modal
-      title={target?.mode === "edit" ? "Edit container profile" : "New container profile"}
+      title={
+        target?.mode === "sandbox"
+          ? "Sandbox settings"
+          : target?.mode === "edit"
+            ? "Edit container profile"
+            : "New container profile"
+      }
       open={target !== null}
       onOpenChange={openChange}
     >
       <Modal.Content>
         {/* Settings inputs read their initial value once, so each target mounts a fresh form. */}
         {target ? (
-          <EditorForm key={targetKey(target)} target={target} theme={theme} onSaved={onSaved} />
+          <EditorForm
+            key={targetKey(target)}
+            target={target}
+            theme={theme}
+            context={
+              target.mode === "sandbox"
+                ? { kind: "sandbox", workspaceId: target.sandbox.workspaceId }
+                : workspace
+            }
+            onSaved={onSaved}
+          />
         ) : null}
       </Modal.Content>
     </Modal>
   );
 }
 
+const PER_LAUNCH = "an engine that starts a sandbox per launch runs each launch's <command>";
+
+const PREVIEW_HINTS: Record<PreviewContext["kind"] | "generic", string> = {
+  generic: `What starting a sandbox from this profile runs, for a plain checkout. Each workspace fills in the <placeholders>; ${PER_LAUNCH}`,
+  new: `What starting this workspace's sandbox runs. The <placeholders> are what creating the workspace decides; ${PER_LAUNCH}`,
+  sandbox: `What starting this sandbox with these settings runs; ${PER_LAUNCH}`,
+};
+
 /**
  * What starting a sandbox from the draft runs, built by the engine code itself on the host, with
  * placeholders for the paths each workspace fills in.
  */
-function CommandPreview({ draft, theme }: { draft: Draft; theme: PluginTheme }) {
+function CommandPreview({
+  draft,
+  theme,
+  context,
+}: {
+  draft: Draft;
+  theme: PluginTheme;
+  context: PreviewContext | undefined;
+}) {
   const preview = useRpc(previewContainerCommandRpc);
   const query = useQuery({
-    queryKey: ["command-preview", draft],
-    queryFn: () => preview({ profile: draft }),
+    queryKey: ["command-preview", draft, context],
+    queryFn: () => preview({ profile: draft, ...(context ? { context } : {}) }),
     placeholderData: keepPreviousData,
     retry: false,
   });
@@ -249,10 +294,7 @@ function CommandPreview({ draft, theme }: { draft: Draft; theme: PluginTheme }) 
   );
   return (
     <SettingsCard>
-      <SettingsRow
-        label="Start command"
-        hint="What starting a sandbox from this profile runs. Each workspace fills in the <placeholders>; an engine that starts a sandbox per launch runs each launch's <command>"
-      />
+      <SettingsRow label="Start command" hint={PREVIEW_HINTS[context?.kind ?? "generic"]} />
       <View style={styles.box}>
         {query.error ? (
           <Text style={styles.error}>{query.error.message}</Text>
@@ -272,10 +314,12 @@ function CommandPreview({ draft, theme }: { draft: Draft; theme: PluginTheme }) 
 function EditorForm({
   target,
   theme,
+  context,
   onSaved,
 }: {
   target: ProfileEditorTarget;
   theme: PluginTheme;
+  context: PreviewContext | undefined;
   onSaved(profile: ContainerProfile | null): void;
 }) {
   const save = useRpc(saveContainerProfileRpc);
@@ -327,6 +371,7 @@ function EditorForm({
       makeDefault,
     });
   }, [draft, makeDefault, saving, target]);
+  const closeAfterRecreate = useCallback(() => onSaved(null), [onSaved]);
   const destroy = useCallback(() => {
     if (target.mode === "edit") deleting.mutate({ id: target.profile.id });
   }, [deleting, target]);
@@ -456,34 +501,42 @@ function EditorForm({
             />
           </>
         )}
-        <SettingsSwitch
-          label="Default profile"
-          hint="Preselected for new sandboxed workspaces"
-          value={makeDefault}
-          onValueChange={setMakeDefault}
-          disabled={busy || (editing && target.isDefault)}
-        />
-      </SettingsCard>
-      <CommandPreview draft={draft} theme={theme} />
-      <SettingsCard>
-        <SettingsAction
-          label={editing ? "Existing workspaces keep their copy" : "Saved for new workspaces"}
-          actionLabel={saving.isPending ? "Saving…" : "Save"}
-          onPress={submit}
-          disabled={
-            busy || !draft.name.trim() || (needsImage && !isValidImage(engine, draft.image.trim()))
-          }
-          error={error}
-        />
-        {editing && target.canDelete ? (
-          <SettingsAction
-            label="Delete this profile"
-            actionLabel={deleting.isPending ? "Deleting…" : "Delete"}
-            onPress={destroy}
-            disabled={busy}
+        {target.mode === "sandbox" ? null : (
+          <SettingsSwitch
+            label="Default profile"
+            hint="Preselected for new sandboxed workspaces"
+            value={makeDefault}
+            onValueChange={setMakeDefault}
+            disabled={busy || (editing && target.isDefault)}
           />
-        ) : null}
+        )}
       </SettingsCard>
+      <CommandPreview draft={draft} theme={theme} context={context} />
+      {target.mode === "sandbox" ? (
+        <RecreateAction sandbox={target.sandbox} next={draft} onDone={closeAfterRecreate} />
+      ) : (
+        <SettingsCard>
+          <SettingsAction
+            label={editing ? "Existing workspaces keep their copy" : "Saved for new workspaces"}
+            actionLabel={saving.isPending ? "Saving…" : "Save"}
+            onPress={submit}
+            disabled={
+              busy ||
+              !draft.name.trim() ||
+              (needsImage && !isValidImage(engine, draft.image.trim()))
+            }
+            error={error}
+          />
+          {editing && target.canDelete ? (
+            <SettingsAction
+              label="Delete this profile"
+              actionLabel={deleting.isPending ? "Deleting…" : "Delete"}
+              onPress={destroy}
+              disabled={busy}
+            />
+          ) : null}
+        </SettingsCard>
+      )}
     </>
   );
 }

@@ -19,6 +19,8 @@ import {
   listTerminalProfilesRpc,
   enableRelativeWorktreesRpc,
   openSandboxShellRpc,
+  recreateSandboxRpc,
+  restartSandboxRpc,
   relativeWorktreesStatusRpc,
   previewContainerCommandRpc,
   sandboxStatusRpc,
@@ -74,14 +76,22 @@ export default function contribute(server: PluginServerContext) {
     const saved = await containerProfiles.save(profile, makeDefault);
     return { ...containerProfiles.snapshot(), saved };
   });
+  server.handle(restartSandboxRpc, async ({ workspaceId }, { paseo }) => {
+    await (await resolve(paseo)).restart(workspaceId);
+    return {};
+  });
+  server.handle(recreateSandboxRpc, async ({ workspaceId, profile }, { paseo }) => {
+    await (await resolve(paseo)).recreate(workspaceId, profile, paseo);
+    return {};
+  });
   server.handle(relativeWorktreesStatusRpc, async ({ projectId }, { paseo }) =>
     (await resolve(paseo)).relativeWorktrees(projectId, paseo),
   );
   server.handle(enableRelativeWorktreesRpc, async ({ projectId }, { paseo }) =>
     (await resolve(paseo)).enableRelativeWorktrees(projectId, paseo),
   );
-  server.handle(previewContainerCommandRpc, async ({ profile }, { paseo }) => ({
-    command: await (await resolve(paseo)).previewCommand(profile),
+  server.handle(previewContainerCommandRpc, async ({ profile, context }, { paseo }) => ({
+    command: await (await resolve(paseo)).previewCommand(profile, context, paseo),
   }));
   server.handle(deleteContainerProfileRpc, async ({ id }) => {
     const { containerProfiles } = await loaded;

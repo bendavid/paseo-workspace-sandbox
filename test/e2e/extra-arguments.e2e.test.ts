@@ -33,7 +33,8 @@ test.skipIf(!available)("passes a quoted value with spaces as one argument", asy
   const policy: ContainerPolicy = {
     engine: "podman",
     cli: cli!,
-    network: "none",
+    // A separate network, Podman's private one: the sysctl needs a namespace of its own.
+    network: "bridge",
     extraMounts: "",
     extraRunArgs: `--sysctl "net.ipv4.ping_group_range=1000 1000" --label 'e2e.note=two words'`,
     user: "host",

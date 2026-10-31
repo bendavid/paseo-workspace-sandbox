@@ -177,6 +177,14 @@ export function engineUsesImage(engine: Engine): boolean {
   return engine !== "bubblewrap" && engine !== "devcontainer";
 }
 
+/**
+ * Engines that keep a sandbox per workspace between launches, which can be restarted and
+ * recreated. Bubblewrap, Apptainer, and Singularity start a fresh one for every launch.
+ */
+export function enginePersistent(engine: Engine): boolean {
+  return engine !== "bubblewrap" && engine !== "apptainer" && engine !== "singularity";
+}
+
 /** Engines whose sandbox the workspace's own configuration describes, not the profile. */
 export function engineReadsWorkspaceConfig(engine: Engine): boolean {
   return engine === "devcontainer";
@@ -452,9 +460,25 @@ export const deleteContainerProfileRpc = defineRpc({
   output: ProfileListSchema,
 });
 
+/** The workspace a start command preview is for: a new one from the form, or an existing one. */
+export const PreviewContextSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("new"),
+    projectId: z.string().min(1),
+    isolation: z.enum(["worktree", "directory"]),
+  }),
+  z.object({ kind: z.literal("sandbox"), workspaceId: z.string().min(1) }),
+]);
+
+export type PreviewContext = z.infer<typeof PreviewContextSchema>;
+
 export const previewContainerCommandRpc = defineRpc({
   name: "sandbox.container-profiles.preview-command",
-  input: z.object({ profile: ContainerProfileSchema.omit({ id: true }) }),
+  input: z.object({
+    profile: ContainerProfileSchema.omit({ id: true }),
+    /** Without one, a plain checkout at a placeholder path. */
+    context: PreviewContextSchema.optional(),
+  }),
   output: z.object({ command: z.string() }),
 });
 
@@ -481,6 +505,77 @@ export const enableRelativeWorktreesRpc = defineRpc({
   name: "sandbox.git.relative-worktrees.enable",
   input: z.object({ projectId: z.string().min(1) }),
   output: RelativeWorktreesSchema,
+});
+
+const PATH_DESCRIPTION = (folder: string | null) =>
+  folder ? `a place under ${folder}` : "its host path";
+
+const CLAUDE_FOLDER_DESCRIPTION: Record<"none" | "shared" | "private", string> = {
+  none: "no Claude folder",
+  shared: "your host Claude folder",
+  private: "its private Claude folder",
+};
+
+/**
+ * What recreating a sandbox with other settings changes for what already ran in it, for the
+ * Sandbox panel to show before the user goes ahead.
+ */
+export function profileChangeWarnings(
+  sandbox: Pick<SandboxRecord, "profile" | "claudeHome">,
+  next: Omit<ContainerProfile, "id">,
+): string[] {
+  const current = sandbox.profile;
+  const warnings: string[] = [];
+  if (current.engine !== next.engine) {
+    warnings.push(
+      `The engine changes from ${ENGINE_LABELS[current.engine]} to ${ENGINE_LABELS[next.engine]}`,
+    );
+  } else if (engineUsesImage(next.engine) && current.image !== next.image) {
+    warnings.push(`The image changes to ${next.image}`);
+  }
+  const before = profileSandboxFolder(current);
+  const after = profileSandboxFolder(next);
+  if (before !== after) {
+    warnings.push(
+      `The workspace's path inside the sandbox changes from ${PATH_DESCRIPTION(before)} to ${PATH_DESCRIPTION(after)}: agents' sessions and the paths they recorded refer to the old one, so resuming them may fail`,
+    );
+  }
+  const claudeBefore = sandbox.claudeHome === "checking" ? "private" : sandbox.claudeHome;
+  const claudeAfter = CLAUDE_HOME_FOR[profileAgentState(next)];
+  if (claudeBefore !== claudeAfter) {
+    warnings.push(
+      `Claude moves from ${CLAUDE_FOLDER_DESCRIPTION[claudeBefore]} to ${CLAUDE_FOLDER_DESCRIPTION[claudeAfter]}: Claude agents started before won't find their sessions to resume, and Paseo may not show their history`,
+    );
+  }
+  if (profileAgentState(current) === "shared" && profileAgentState(next) !== "shared") {
+    warnings.push("The other agents' folders are no longer mounted, so they start signed out");
+  }
+  if (profileUser(current) !== profileUser(next)) {
+    warnings.push(
+      `The user changes from ${USER_LABELS[profileUser(current)]} to ${USER_LABELS[profileUser(next)]}: files the sandbox writes from now on may belong to someone else`,
+    );
+  }
+  return warnings;
+}
+
+/** Stops and starts a workspace's sandbox, for engines that keep one. */
+export const restartSandboxRpc = defineRpc({
+  name: "sandbox.restart",
+  input: z.object({ workspaceId: z.string().min(1) }),
+  output: z.object({}),
+});
+
+/**
+ * Removes a workspace's sandbox and creates it again, from its own copy of a profile or, when
+ * given, from other settings, which become the sandbox's copy.
+ */
+export const recreateSandboxRpc = defineRpc({
+  name: "sandbox.recreate",
+  input: z.object({
+    workspaceId: z.string().min(1),
+    profile: ContainerProfileSchema.extend({ id: z.string().min(1).optional() }).optional(),
+  }),
+  output: z.object({}),
 });
 
 /** What the header badge shows: known without inspecting the container. */
