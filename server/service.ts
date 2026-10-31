@@ -26,10 +26,10 @@ import { listRefs } from "./git";
 import { resolveTerminalLaunch } from "./terminals";
 import { writeFileAtomic, type SandboxStore } from "./store";
 import {
-  engineHasUserChoice,
   engineUsesImage,
   imageHint,
   isValidImage,
+  profileUser,
   type ContainerProfile,
   type ContainerStatus,
   type ImageChoice,
@@ -181,7 +181,7 @@ export class SandboxService {
       extraMounts: profile.extraMounts,
       extraRunArgs: profile.extraRunArgs,
       // Engines without the choice always run as you; profiles from before the setting do too.
-      runAsHostUser: !engineHasUserChoice(profile.engine) || profile.runAsHostUser !== false,
+      user: profileUser(profile),
       shareAgentState: profile.shareAgentState !== false,
     };
   }

@@ -27,8 +27,8 @@ async function sandboxOptions(target: ContainerTarget, policy: ContainerPolicy):
     target.workdir,
     // As you, commands run as your uid, as in the container engines; otherwise as the image's
     // default user.
-    ...(policy.runAsHostUser ? ["-u", `${user.uid}:${user.gid}`] : []),
-    ...baseEnvironment(target, policy.runAsHostUser).flatMap(([name, value]) => [
+    ...(policy.user !== "image" ? ["-u", `${user.uid}:${user.gid}`] : []),
+    ...baseEnvironment(target, policy.user !== "image").flatMap(([name, value]) => [
       "-e",
       `${name}=${value}`,
     ]),
@@ -67,7 +67,7 @@ async function inspect(cli: string, name: string): Promise<ContainerStatus> {
 /** Once, in a microVM just created; see prepareUser in oci.ts. */
 async function prepareUser(target: ContainerTarget, policy: ContainerPolicy): Promise<void> {
   try {
-    if (policy.runAsHostUser) {
+    if (policy.user !== "image") {
       await runCli(policy.cli, [
         "exec",
         "-u",

@@ -2,8 +2,8 @@
 // and Singularity a SIF built from Podman's copy of it.
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { backendFor, resolveEngineCli } from "../../server/backends/index";
@@ -47,4 +47,44 @@ export async function engineImage(engine: Engine): Promise<{ cli: string; image:
   const { images } = backendFor(engine);
   if (images && !(await images.localDigests(cli, IMAGE))) return null;
   return { cli, image: IMAGE };
+}
+
+const WITHOUT_ACCOUNT = "localhost/paseo-sandbox-e2e-squashed:1";
+
+/**
+ * IMAGE without accounts for your uid and gid, built locally from Podman's copy once, for a
+ * squashed sandbox, where Podman adds your account only for a uid the image has none for. Like
+ * images with a system service, it has a folder in /run owned by another id. Null without
+ * Podman's copy.
+ */
+export async function imageWithoutAccount(podman: string): Promise<string | null> {
+  if (
+    await run(podman, ["image", "exists", WITHOUT_ACCOUNT]).then(
+      () => true,
+      () => false,
+    )
+  ) {
+    return WITHOUT_ACCOUNT;
+  }
+  if (
+    !(await run(podman, ["image", "exists", IMAGE]).then(
+      () => true,
+      () => false,
+    ))
+  )
+    return null;
+  const { uid, gid } = userInfo();
+  const remove = [
+    `user=$(getent passwd ${uid} | cut -d: -f1); [ -z "$user" ] || userdel -r "$user"`,
+    `group=$(getent group ${gid} | cut -d: -f1); [ -z "$group" ] || groupdel "$group"`,
+    "mkdir -p /run/service && chown 100:100 /run/service",
+  ].join("; ");
+  const directory = await mkdtemp(path.join(tmpdir(), "paseo-sandbox-e2e-build-"));
+  try {
+    await writeFile(path.join(directory, "Containerfile"), `FROM ${IMAGE}\nRUN ${remove}\n`);
+    await run(podman, ["build", "--pull=never", "-t", WITHOUT_ACCOUNT, directory]);
+    return WITHOUT_ACCOUNT;
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }

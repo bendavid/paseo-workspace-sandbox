@@ -16,6 +16,57 @@ import {
 } from "../container";
 import { KEEPALIVE, type SandboxBackend } from "./types";
 
+/**
+ * Podman with only your ids mapped, to the same ids. Podman sets ping_group_range to "0 0" in a
+ * container's own network namespace, which fails while group 0 is unmapped.
+ */
+function squashedIdentity(network: ContainerPolicy["network"]): string[] {
+  const user = userInfo();
+  return [
+    "--uidmap",
+    `${user.uid}:0:1`,
+    "--gidmap",
+    `${user.gid}:0:1`,
+    "--user",
+    `${user.uid}:${user.gid}`,
+    "--group-add",
+    "keep-groups",
+    ...(network === "host"
+      ? []
+      : ["--sysctl", `net.ipv4.ping_group_range=${user.gid} ${user.gid}`]),
+  ];
+}
+
+/**
+ * Squashed: a read-only root, since nothing in it can act as root and the image's files appear as
+ * yours, with /tmp, /var/tmp, /run, /dev/shm, and HOME (unless a mount provides it) in memory.
+ * They start empty: Podman's own read-only tmpfs copies the image's /run in and fails on files
+ * there owned by ids that are not mapped, such as dbus's. Podman adds your account for a uid the
+ * image has no account for; it leaves an existing one alone, and nothing inside could change it.
+ */
+async function squashedOptions(policy: ContainerPolicy, mountPaths: string[]): Promise<string[]> {
+  const [name, uid, gid, group, home] = await hostAccount();
+  const homeMounted = mountPaths.some(
+    (mount) => mount === "/" || mount === home || home!.startsWith(`${mount}/`),
+  );
+  return [
+    ...squashedIdentity(policy.network),
+    "--read-only",
+    "--read-only-tmpfs=false",
+    ...["/tmp", "/var/tmp", "/dev/shm"].flatMap((folder) => [
+      "--tmpfs",
+      `${folder}:notmpcopyup,mode=1777`,
+    ]),
+    "--tmpfs",
+    "/run:notmpcopyup",
+    "--passwd-entry",
+    `${name}:x:${uid}:${gid}::${home}:/bin/sh`,
+    "--group-entry",
+    `${group}:x:${gid}:${name}`,
+    ...(homeMounted ? [] : ["--tmpfs", `${home}:notmpcopyup,mode=0700`]),
+  ];
+}
+
 /** Everything between `run` and the image, shared by the sandbox and its throwaway runs. */
 async function containerOptions(
   target: ContainerTarget,
@@ -26,13 +77,19 @@ async function containerOptions(
   // namespace, Docker runs the process as your uid. Otherwise the image's default user runs.
   // keep-id alone drops your supplementary groups, so files you reach through a group (a team's
   // project folder, a shared file system) would be refused; keep-groups keeps them (crun only).
+  const resolved = await resolveMounts(target, policy);
   let identity: string[] = [];
-  if (policy.runAsHostUser) {
+  if (policy.user === "squashed") {
+    identity = await squashedOptions(
+      policy,
+      resolved.map((mount) => mount.path),
+    );
+  } else if (policy.user === "host") {
     identity = (await isPodman(policy.cli))
       ? ["--userns=keep-id", "--group-add", "keep-groups"]
       : ["--user", `${user.uid}:${user.gid}`];
   }
-  const mounts = (await resolveMounts(target, policy)).flatMap((mount) => [
+  const mounts = resolved.flatMap((mount) => [
     "-v",
     `${mount.source ?? mount.path}:${mount.path}${mount.readOnly ? ":ro" : ""}`,
   ]);
@@ -44,7 +101,7 @@ async function containerOptions(
     ...identity,
     "--workdir",
     target.workdir,
-    ...baseEnvironment(target, policy.runAsHostUser).flatMap(([name, value]) => [
+    ...baseEnvironment(target, policy.user !== "image").flatMap(([name, value]) => [
       "-e",
       `${name}=${value}`,
     ]),
@@ -70,12 +127,13 @@ async function inspect(cli: string, name: string): Promise<ContainerStatus> {
 
 /**
  * Once, in a container just created: your account, as root, when it runs as you; otherwise links
- * to the provider folders in the image user's home. A failure leaves a working sandbox, so it is
- * logged rather than thrown.
+ * to the provider folders in the image user's home. A squashed sandbox has no root; Podman wrote
+ * its account. A failure leaves a working sandbox, so it is logged rather than thrown.
  */
 async function prepareUser(target: ContainerTarget, policy: ContainerPolicy): Promise<void> {
   try {
-    if (policy.runAsHostUser) {
+    if (policy.user === "squashed") return;
+    if (policy.user === "host") {
       await runCli(policy.cli, [
         "exec",
         "--user",

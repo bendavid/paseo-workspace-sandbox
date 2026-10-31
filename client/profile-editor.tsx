@@ -12,16 +12,19 @@ import { useCallback, useState } from "react";
 import {
   DEFAULT_IMAGE,
   ENGINE_NETWORKS,
+  ENGINE_USER_MODES,
   defaultNetwork,
   deleteContainerProfileRpc,
   engineUsesImage,
-  engineHasUserChoice,
   imageHint,
   isValidImage,
+  profileUser,
   saveContainerProfileRpc,
   type ContainerProfile,
   type Engine,
   type Network,
+  USER_LABELS,
+  type UserMode,
 } from "../shared/rpc";
 
 const ENGINE_OPTIONS = [
@@ -79,6 +82,17 @@ function supportedNetwork(engine: Engine, network: Network): Network {
   return ENGINE_NETWORKS[engine].includes(network) ? network : "host";
 }
 
+const USER_HINTS: Record<UserMode, string> = {
+  host: "Your uid and gid, with your home path as HOME and an account for you in the image",
+  squashed:
+    "As Host user, but only your uid and gid exist inside, so the engine mounts as you, as NFS needs. The image's files appear as yours and nothing runs as root",
+  image: "The image's default user and home; files it writes to mounts may belong to that user",
+};
+
+function userOptions(engine: Engine) {
+  return ENGINE_USER_MODES[engine].map((value) => ({ label: USER_LABELS[value], value }));
+}
+
 const BLANK: Omit<ContainerProfile, "id"> = {
   name: "",
   engine: "podman",
@@ -87,7 +101,7 @@ const BLANK: Omit<ContainerProfile, "id"> = {
   network: defaultNetwork("podman"),
   extraMounts: "",
   extraRunArgs: "",
-  runAsHostUser: true,
+  user: "host",
   shareAgentState: true,
 };
 
@@ -114,7 +128,7 @@ function fields(profile: ContainerProfile): Draft {
     network: supportedNetwork(profile.engine, profile.network),
     extraMounts: profile.extraMounts,
     extraRunArgs: profile.extraRunArgs,
-    runAsHostUser: profile.runAsHostUser !== false,
+    user: profileUser(profile),
     shareAgentState: profile.shareAgentState !== false,
   };
 }
@@ -191,8 +205,12 @@ function EditorForm({
           current.network === defaultNetwork(current.engine)
             ? defaultNetwork(choice.value)
             : supportedNetwork(choice.value, current.network),
+        user: profileUser({ engine: choice.value, user: current.user }),
       }));
     }
+  }, []);
+  const selectUser = useCallback((user: UserMode) => {
+    setDraft((current) => ({ ...current, user }));
   }, []);
   const submit = useCallback(() => {
     saving.mutate({
@@ -250,16 +268,13 @@ function EditorForm({
           onValueChange={field("shareAgentState")}
           disabled={busy}
         />
-        {engineHasUserChoice(engine) ? (
-          <SettingsSwitch
-            label="Run as host user"
-            hint={
-              draft.runAsHostUser !== false
-                ? "Your uid and gid, with your home path as HOME and an account for you in the image"
-                : "The image's default user and home; files it writes to mounts may belong to that user"
-            }
-            value={draft.runAsHostUser !== false}
-            onValueChange={field("runAsHostUser")}
+        {ENGINE_USER_MODES[engine].length > 1 ? (
+          <SettingsSelect
+            label="User"
+            hint={USER_HINTS[profileUser(draft)]}
+            value={profileUser(draft)}
+            options={userOptions(engine)}
+            onValueChange={selectUser}
             disabled={busy}
           />
         ) : null}

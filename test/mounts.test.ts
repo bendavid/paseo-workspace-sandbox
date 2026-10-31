@@ -29,7 +29,7 @@ function policy(extraMounts: string): ContainerPolicy {
     network: "host",
     extraMounts,
     extraRunArgs: "",
-    runAsHostUser: true,
+    user: "host",
     shareAgentState: true,
   };
 }

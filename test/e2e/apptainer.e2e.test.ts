@@ -43,7 +43,7 @@ async function sandbox(engine: Engine, network: ContainerPolicy["network"] = "ho
     network,
     extraMounts: "",
     extraRunArgs: "",
-    runAsHostUser: true,
+    user: "host",
     shareAgentState: true,
   };
   return { root, target, policy, backend: backendFor(engine) };

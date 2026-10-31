@@ -49,7 +49,7 @@ describe.each(ENGINES)("sandbox-run with %s", (engine) => {
       network: "host",
       extraMounts: "",
       extraRunArgs: "",
-      runAsHostUser: true,
+      user: "host",
       shareAgentState: true,
     };
     const wrapper = await writeWrapper(state);

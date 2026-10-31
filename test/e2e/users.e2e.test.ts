@@ -1,6 +1,7 @@
-// The sandbox's user with each engine that keeps a sandbox, as you or as the image's default user.
-// The image already has an account (node) for uid 1000, which running as you replaces. Images are
-// never downloaded: an engine without IMAGE is skipped.
+// The sandbox's user with each engine that keeps a sandbox: as you, squashed, or as the image's
+// default user. The image already has an account (node) for uid 1000, which running as you
+// replaces; a squashed sandbox uses a local copy without an account for your uid, since Podman only
+// adds one. Images are never downloaded: an engine without IMAGE is skipped.
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -15,7 +16,8 @@ import {
   type ContainerPolicy,
   type ContainerTarget,
 } from "../../server/container";
-import type { Engine } from "../../shared/rpc";
+import { ENGINE_USER_MODES, type Engine, type UserMode } from "../../shared/rpc";
+import { imageWithoutAccount } from "./images";
 
 const run = promisify(execFile);
 const IMAGE = "docker.io/library/node:22-bookworm-slim";
@@ -37,6 +39,7 @@ const ENGINES: Engine[] = ["podman", "microsandbox"];
 const clis = Object.fromEntries(
   await Promise.all(ENGINES.map(async (engine) => [engine, await available(engine)] as const)),
 );
+const squashedImage = clis.podman ? await imageWithoutAccount(clis.podman) : null;
 
 const REPORT = [
   'echo "uid=$(id -u)"',
@@ -46,7 +49,19 @@ const REPORT = [
   'echo "home=$HOME"',
   'echo "codex=$(readlink "$HOME/.codex" 2>/dev/null)"',
   'echo "safe=${GIT_CONFIG_VALUE_0:-}"',
+  'echo "ids=$(wc -l </proc/self/uid_map)"',
+  'echo "passwdOwner=$(stat -c %u /etc/passwd)"',
+  'echo "rootWritable=$(touch /usr/.paseo-probe 2>/dev/null && echo yes || echo no)"',
+  'echo "homeWritable=$(touch "$HOME/.paseo-probe" 2>/dev/null && echo yes || echo no)"',
+  'echo "memoryWritable=$(touch /tmp/p /var/tmp/p /run/p /dev/shm/p 2>/dev/null && echo yes || echo no)"',
 ].join("\n");
+
+const CASES: Array<[string, UserMode, boolean]> = [
+  ["as you", "host", true],
+  ["as you, squashed", "squashed", true],
+  ["as the image's default user", "image", true],
+  ["as the image's default user, sharing no agent state", "image", false],
+];
 
 function exec(engine: Engine, cli: string, container: string): Promise<string> {
   return engine === "microsandbox"
@@ -56,67 +71,77 @@ function exec(engine: Engine, cli: string, container: string): Promise<string> {
 
 describe.each(ENGINES)("the user in a %s sandbox", (engine) => {
   const cli = clis[engine];
-  test.skipIf(!cli).each([
-    ["as you", true, true],
-    ["as the image's default user", false, true],
-    ["as the image's default user, sharing no agent state", false, false],
-  ])("runs %s", async (_label, runAsHostUser, shareAgentState) => {
-    const root = await mkdtemp(path.join(tmpdir(), "sandbox-users-e2e-"));
-    roots.push(root);
-    const target: ContainerTarget = {
-      container: `paseo-sandbox-e2e-${randomBytes(4).toString("hex")}`,
-      label: "e2e=1",
-      image: IMAGE,
-      workspace: root,
-      workdir: root,
-      claude: { mode: "none" },
-    };
-    const policy: ContainerPolicy = {
-      engine,
-      cli: cli!,
-      network: "none",
-      extraMounts: "",
-      extraRunArgs: "",
-      runAsHostUser,
-      shareAgentState,
-    };
-    const backend = backendFor(engine);
-    try {
-      await backend.start(target, policy);
-      const report = Object.fromEntries(
-        (await exec(engine, cli!, target.container))
-          .trim()
-          .split("\n")
-          .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
-      );
-      const user = userInfo();
-      const group = (await run("id", ["-gn"])).stdout.trim();
-      if (runAsHostUser && engine === "podman") {
-        // Your supplementary groups too, as the kernel sees the container's process.
-        const pid = (
-          await runCli(cli!, ["inspect", "--format", "{{.State.Pid}}", target.container])
-        ).trim();
-        const status = await readFile(`/proc/${pid}/status`, "utf8");
-        const groups = /^Groups:(.*)$/m.exec(status)?.[1]?.trim().split(/\s+/).map(Number) ?? [];
-        expect(groups.toSorted()).toEqual([...new Set(process.getgroups?.() ?? [])].toSorted());
+  test.skipIf(!cli).each(CASES.filter(([, user]) => ENGINE_USER_MODES[engine].includes(user)))(
+    "runs %s",
+    async (_label, user, shareAgentState) => {
+      const asHostUser = user !== "image";
+      const root = await mkdtemp(path.join(tmpdir(), "sandbox-users-e2e-"));
+      roots.push(root);
+      const target: ContainerTarget = {
+        container: `paseo-sandbox-e2e-${randomBytes(4).toString("hex")}`,
+        label: "e2e=1",
+        image: user === "squashed" ? squashedImage! : IMAGE,
+        workspace: root,
+        workdir: root,
+        claude: { mode: "none" },
+      };
+      const policy: ContainerPolicy = {
+        engine,
+        cli: cli!,
+        network: "none",
+        extraMounts: "",
+        extraRunArgs: "",
+        user,
+        shareAgentState,
+      };
+      const backend = backendFor(engine);
+      try {
+        await backend.start(target, policy);
+        const report = Object.fromEntries(
+          (await exec(engine, cli!, target.container))
+            .trim()
+            .split("\n")
+            .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
+        );
+        const account = userInfo();
+        const group = (await run("id", ["-gn"])).stdout.trim();
+        if (asHostUser && engine === "podman") {
+          // Your supplementary groups too, as the kernel sees the container's process.
+          const pid = (
+            await runCli(cli!, ["inspect", "--format", "{{.State.Pid}}", target.container])
+          ).trim();
+          const status = await readFile(`/proc/${pid}/status`, "utf8");
+          const groups = /^Groups:(.*)$/m.exec(status)?.[1]?.trim().split(/\s+/).map(Number) ?? [];
+          expect(groups.toSorted()).toEqual([...new Set(process.getgroups?.() ?? [])].toSorted());
+        }
+        if (user === "squashed") {
+          // Only your uid exists inside; the root is read-only and HOME is writable memory.
+          expect(report).toMatchObject({
+            ids: "1",
+            passwdOwner: String(account.uid),
+            rootWritable: "no",
+            homeWritable: "yes",
+            memoryWritable: "yes",
+          });
+        }
+        if (asHostUser) {
+          expect(report).toMatchObject({
+            uid: String(account.uid),
+            whoami: account.username,
+            passwd: `${account.username}:x:${account.uid}:${account.gid}::${homedir()}:/bin/sh`,
+            group,
+            home: homedir(),
+            safe: "",
+          });
+        } else {
+          // The node image's default user is root, with /root as its home.
+          expect(report).toMatchObject({ uid: "0", whoami: "root", home: "/root", safe: "*" });
+          const codex = providerDirectories().find((directory) => directory.endsWith("/.codex"));
+          if (codex) expect(report.codex).toBe(shareAgentState ? codex : "");
+        }
+      } finally {
+        await backend.remove(target, policy).catch(() => undefined);
       }
-      if (runAsHostUser) {
-        expect(report).toMatchObject({
-          uid: String(user.uid),
-          whoami: user.username,
-          passwd: `${user.username}:x:${user.uid}:${user.gid}::${homedir()}:/bin/sh`,
-          group,
-          home: homedir(),
-          safe: "",
-        });
-      } else {
-        // The node image's default user is root, with /root as its home.
-        expect(report).toMatchObject({ uid: "0", whoami: "root", home: "/root", safe: "*" });
-        const codex = providerDirectories().find((directory) => directory.endsWith("/.codex"));
-        if (codex) expect(report.codex).toBe(shareAgentState ? codex : "");
-      }
-    } finally {
-      await backend.remove(target, policy).catch(() => undefined);
-    }
-  });
+    },
+  );
 });

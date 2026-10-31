@@ -36,7 +36,7 @@ test.skipIf(!available)("passes a quoted value with spaces as one argument", asy
     network: "none",
     extraMounts: "",
     extraRunArgs: `--sysctl "net.ipv4.ping_group_range=1000 1000" --label 'e2e.note=two words'`,
-    runAsHostUser: true,
+    user: "host",
     shareAgentState: false,
   };
   try {

@@ -13,7 +13,8 @@ import { Text } from "react-native";
 import {
   chooseImageRpc,
   describeProfile,
-  engineHasUserChoice,
+  profileUser,
+  USER_LABELS,
   openSandboxShellRpc,
   sandboxStatusRpc,
   type ClaudeLogin,
@@ -199,12 +200,7 @@ export function SandboxPanel({ workspaceId, theme, layout }: PluginWorkspacePane
             <Text style={styles.value}>{sandbox.profile.network}</Text>
           </SettingsRow>
           <SettingsRow label="User">
-            <Text style={styles.value}>
-              {!engineHasUserChoice(sandbox.profile.engine) ||
-              sandbox.profile.runAsHostUser !== false
-                ? "You (host user)"
-                : "The image's default user"}
-            </Text>
+            <Text style={styles.value}>{USER_LABELS[profileUser(sandbox.profile)]}</Text>
           </SettingsRow>
           {sandbox.profile.extraMounts ? (
             <SettingsRow label="Extra mounts">

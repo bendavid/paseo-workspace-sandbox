@@ -79,23 +79,22 @@ or Kata go in **Extra run arguments** (`--runtime krun`). Extra run arguments ar
 like a shell command, without expanding variables or `~`: quote or backslash-escape a value with
 spaces, as in `--sysctl "net.ipv4.ping_group_range=1000 1000"`.
 
-- **Podman and Docker** keep a long-lived container that launches join with `exec`. Run as host
-  user, Podman uses `--userns=keep-id` and Docker `--user <uid>:<gid>`; see
-  [User](#user).
+- **Podman and Docker** keep a long-lived container that launches join with `exec`. As Host user,
+  Podman uses `--userns=keep-id` and Docker `--user <uid>:<gid>`; see [User](#user).
 - **Bubblewrap** keeps nothing between launches: each one is a fresh sandbox with the host's `/usr`,
   `/etc`, and `/opt` read-only, its own `/proc`, `/dev`, `/tmp`, and `/run`, the sandbox's mounts,
   and a clean environment. Tools are the host's own. The home directory is a scratch folder for the
   launch unless a mount covers it. It needs unprivileged user namespaces; starting the sandbox runs
   `true` in one, so a host without them shows a start failure. Extra run arguments go to `bwrap`.
 - **microsandbox** keeps a libkrun microVM per workspace and joins it with `exec`, sharing host
-  folders over virtio-fs at the same paths, with `-u <uid>:<gid>` run as host user. Each launch's
+  folders over virtio-fs at the same paths, with `-u <uid>:<gid>` as Host user. Each launch's
   variables are passed as `-e NAME`, which keeps their values off its command line. libkrun does not
   strictly confine a guest to a shared folder's subtree, so share narrow folders.
 - **Apptainer and Singularity** start a fresh container per launch, like Bubblewrap, with
   `apptainer exec --containall --cleanenv --writable-tmpfs`: no automatic mounts of your home,
   the working directory, or `/tmp`, none of the daemon's environment, and a writable layer over the
   read-only image for the launch. They run as you and add your account to the container's
-  `/etc/passwd` themselves, so there is no Run as host user setting; the home directory is a
+  `/etc/passwd` themselves, so there is no User setting; the home directory is a
   scratch folder for the launch unless a mount covers it. The image is a full registry reference,
   pulled with `apptainer pull` into `images/` in the plugin's data folder after you agree, with the
   registry's digests recorded beside it for the freshness check, or the absolute path of a local
@@ -133,10 +132,12 @@ design and has no `.git` handling.
 
 ### User
 
-The profile's **Run as host user** setting, on by default, applies to Podman, Docker, and
-microsandbox; Bubblewrap always runs as you.
+The profile's **User** setting applies to Podman (all three choices), Docker, and microsandbox
+(Host user and Image default user); Bubblewrap, Apptainer, and Singularity always run as you.
+Profiles saved before the setting run as Host user, or as Image default user if they had Run as
+host user turned off.
 
-- **On:** commands run as your uid and gid, `HOME` is your host home path, and `USER` your user
+- **Host user** (the default): commands run as your uid and gid, `HOME` is your host home path, and `USER` your user
   name. When the sandbox is created, the plugin writes an account for you into its `/etc/passwd`
   and `/etc/group`, with your name, group, home, and `/bin/sh`, replacing whatever the image had
   for that uid or name, such as the Node images' `node` account for uid 1000. Tools that read the
@@ -144,18 +145,31 @@ microsandbox; Bubblewrap always runs as you.
   written to mounts belong to you. Podman also gets `--group-add keep-groups`, which keeps your
   supplementary groups, so files you reach through a group, such as a team's project folder or a
   shared file system, stay reachable; inside, those groups show as `nogroup`. It needs the `crun`
-  runtime and rules out other `--group-add` options; for another runtime, or your own groups, turn
-  this setting off and pass `--userns`, `--user`, and `--group-add` under extra run arguments.
+  runtime and rules out other `--group-add` options; for another runtime, or your own groups, choose
+  Image default user and pass `--userns`, `--user`, and `--group-add` under extra run arguments.
   Docker keeps only your primary group; add others with `--group-add <gid>`. microsandbox's guest
   checks permissions with your primary group only.
-- **Off:** commands run as the image's default user, often root, with its own home and dotfiles.
+- **Host user, squashed** (Podman): as Host user, but the container's user namespace maps only your
+  uid and gid, with `--uidmap <uid>:0:1 --gidmap <gid>:0:1`. Podman and the runtime then set up the
+  mounts as you rather than as a subordinate uid. NFS needs that for mounts inside folders only you
+  can enter, such as the shared Claude entries in a workspace's private Claude folder; with
+  keep-id, those fail when the folder is on NFS. Nothing inside can act as root, and the image's
+  files appear as yours, so the root file system is read-only. `/tmp`, `/var/tmp`, `/run`,
+  `/dev/shm`, and `HOME` (unless a mount covers it) are in memory, start empty, and are emptied when
+  the sandbox stops; Podman's own read-only setup would copy the image's `/run` in, which fails for
+  images with files there owned by system users. Your account comes from `--passwd-entry` and
+  `--group-entry`, which Podman applies only when the image has no account for your uid, so use
+  images without one. An own network namespace also gets
+  `--sysctl net.ipv4.ping_group_range=<gid> <gid>`, since Podman's default of `0 0` fails while
+  group 0 is unmapped. Packages can't be installed in the sandbox; put the tools in the image.
+- **Image default user:** commands run as the image's default user, often root, with its own home and dotfiles.
   The provider folders are still mounted at their host paths, and linked from the image user's
   home (`~/.codex` and so on) so agents find them. Files written to mounts belong to whoever that
   user maps to: you with rootless Podman's root and with microsandbox, but root with Docker's
   root, or another uid for a non-root image user. Git is told to accept repositories owned by
   others (`safe.directory`), since it otherwise refuses them.
 
-When running as host user, only the explicit mounts exist under `HOME`. A container engine creates it owned
+As Host user, only the explicit mounts exist under `HOME`. A container engine creates it owned
 by root as the parent of the provider directories, so it is not writable: tools that write
 elsewhere in `~`, such as npm's cache, `~/.cache`, or `~/.config`, fail until you add those
 directories, or `~` itself, under extra mounts.
@@ -220,7 +234,7 @@ the shell would be slower, and anything the dotfiles print would reach the agent
   secrets. A recreated container captures again. Delete the file to pick up changed dotfiles.
 - Variables `sandbox-run` forwards for each launch (`PASEO_*`, provider, and locale variables)
   override captured ones.
-- Running as host user, your dotfiles only take part when an extra mount covers them, such as
+- As Host user, squashed or not, your dotfiles only take part when an extra mount covers them, such as
   `~:ro`; otherwise the image user's own dotfiles do.
 
 ## Claude Code sign-in

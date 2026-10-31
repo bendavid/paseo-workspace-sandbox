@@ -61,7 +61,7 @@ describe.each(ENGINES)("a sandboxed worktree with %s", (engine) => {
       network: "none",
       extraMounts: "",
       extraRunArgs: "",
-      runAsHostUser: true,
+      user: "host",
       shareAgentState: true,
     };
     const output = await backendFor(engine).runOnce(target, policy, [

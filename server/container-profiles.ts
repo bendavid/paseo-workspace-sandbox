@@ -9,7 +9,9 @@ import {
   ENGINE_NETWORKS,
   engineUsesImage,
   imageHint,
+  ENGINE_USER_MODES,
   isValidImage,
+  profileUser,
   splitArguments,
   type ContainerProfile,
 } from "../shared/rpc";
@@ -90,10 +92,15 @@ export class ContainerProfiles {
     if (!ENGINE_NETWORKS[input.engine].includes(input.network)) {
       throw new Error(`${input.engine} has no ${input.network} network`);
     }
+    if (input.user && !ENGINE_USER_MODES[input.engine].includes(input.user)) {
+      throw new Error(`${input.engine} has no ${input.user} user`);
+    }
     // Throws on unbalanced quotes, which would otherwise fail only when a sandbox starts.
     splitArguments(input.extraRunArgs);
+    const { runAsHostUser: _legacy, ...rest } = input;
     const profile: ContainerProfile = {
-      ...input,
+      ...rest,
+      user: profileUser(input),
       id: input.id ?? `profile-${randomUUID().slice(0, 8)}`,
     };
     const index = this.profiles.findIndex((candidate) => candidate.id === profile.id);

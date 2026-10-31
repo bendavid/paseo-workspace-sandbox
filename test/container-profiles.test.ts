@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { ContainerProfiles } from "../server/container-profiles";
-import { DEFAULT_IMAGE } from "../shared/rpc";
+import { DEFAULT_IMAGE, profileUser } from "../shared/rpc";
 
 const roots: string[] = [];
 
@@ -110,4 +110,35 @@ test("rejects extra run arguments with an unclosed quote", async () => {
     false,
   );
   expect(store.get(saved.id).extraRunArgs).toBe('--sysctl "net.ipv4.ping_group_range=0 0"');
+});
+
+test("saves a user mode the engine has, replacing the old Run as host user setting", async () => {
+  const store = new ContainerProfiles(await directory());
+  await store.load();
+  const profile = {
+    name: "Squashed",
+    engine: "podman",
+    image: DEFAULT_IMAGE,
+    network: "bridge",
+    extraMounts: "",
+    extraRunArgs: "",
+  } as const;
+  expect((await store.save({ ...profile, user: "squashed" }, false)).user).toBe("squashed");
+  // A profile from before the choice: false meant the image's default user.
+  const legacy = await store.save({ ...profile, runAsHostUser: false }, false);
+  expect(legacy).toMatchObject({ user: "image" });
+  expect(legacy).not.toHaveProperty("runAsHostUser");
+  expect((await store.save({ ...profile }, false)).user).toBe("host");
+  await expect(
+    store.save({ ...profile, engine: "docker", user: "squashed" }, false),
+  ).rejects.toThrow(/docker has no squashed user/);
+});
+
+test("reads a sandbox's user mode, including records saved before the choice", () => {
+  expect(profileUser({ engine: "podman" })).toBe("host");
+  expect(profileUser({ engine: "podman", runAsHostUser: false })).toBe("image");
+  expect(profileUser({ engine: "podman", user: "squashed" })).toBe("squashed");
+  // Engines without a choice run as you, whatever the record says.
+  expect(profileUser({ engine: "bubblewrap", runAsHostUser: false })).toBe("host");
+  expect(profileUser({ engine: "docker", user: "squashed" })).toBe("host");
 });

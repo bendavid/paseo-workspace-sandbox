@@ -49,9 +49,44 @@ export function defaultNetwork(engine: Engine): Network {
   return ENGINE_NETWORKS[engine].includes("bridge") ? "bridge" : "host";
 }
 
-/** Engines with a Run as host user choice; the others always run as you. */
-export function engineHasUserChoice(engine: Engine): boolean {
-  return engine === "podman" || engine === "docker" || engine === "microsandbox";
+/**
+ * Who runs in the sandbox:
+ * - `host`: your uid and gid, with your home path as HOME and an account for you in the image.
+ * - `squashed`: the same, in a user namespace that maps only your uid and gid, so the engine sets
+ *   up mounts as you rather than as a subordinate uid. NFS needs that for mounts inside folders
+ *   only you can enter. The image's files appear as yours, and nothing can act as root.
+ * - `image`: the image's own default user and home.
+ */
+export const USER_MODES = ["host", "squashed", "image"] as const;
+export type UserMode = (typeof USER_MODES)[number];
+
+/** The user modes each engine has; Bubblewrap, Apptainer, and Singularity always run as you. */
+export const ENGINE_USER_MODES: Record<Engine, readonly UserMode[]> = {
+  podman: ["host", "squashed", "image"],
+  docker: ["host", "image"],
+  microsandbox: ["host", "image"],
+  bubblewrap: ["host"],
+  apptainer: ["host"],
+  singularity: ["host"],
+};
+
+export const USER_LABELS: Record<UserMode, string> = {
+  host: "Host user",
+  squashed: "Host user, squashed",
+  image: "Image default user",
+};
+
+/**
+ * A profile's user mode. Profiles from before the choice have `runAsHostUser`, where false meant
+ * the image's user; a mode the engine lacks runs as you.
+ */
+export function profileUser(profile: {
+  engine: Engine;
+  user?: UserMode | undefined;
+  runAsHostUser?: boolean | undefined;
+}): UserMode {
+  const user = profile.user ?? (profile.runAsHostUser === false ? "image" : "host");
+  return ENGINE_USER_MODES[profile.engine].includes(user) ? user : "host";
 }
 
 /** "Podman · node:22", or "Bubblewrap · host system". */
@@ -149,13 +184,11 @@ export const ContainerProfileSchema = z.object({
   network: z.enum(["host", "bridge", "none"]),
   // Host paths, one per line or comma separated, mounted at the same path. ":ro" for read-only.
   extraMounts: z.string(),
-  // Whitespace-separated arguments added to `run`, such as `--memory 4g -e PATH=/opt/bin:/usr/bin`.
+  // Arguments added to `run`, split with shell quoting, such as `--memory 4g -e PATH=/opt/bin:/usr/bin`.
   extraRunArgs: z.string(),
-  /**
-   * Podman, Docker, and microsandbox: run as your uid and gid with your home path as HOME and an
-   * account for you in the image, or, when false, as the image's own default user and home.
-   * Bubblewrap always runs as you. Profiles from before this setting run as you.
-   */
+  /** Who runs in the sandbox; read it with profileUser. Profiles from before it run as you. */
+  user: z.enum(USER_MODES).optional(),
+  /** Replaced by `user`: false meant the image's default user. Dropped when the profile is saved. */
   runAsHostUser: z.boolean().optional(),
   /**
    * Mount the agents' own folders (~/.codex and the like) and give Claude a private config folder

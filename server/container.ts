@@ -3,7 +3,7 @@ import { lstat, mkdir, rm, symlink } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
 import { execCommand } from "@getpaseo/plugin/server";
-import { type Engine, type SandboxRecord, splitArguments } from "../shared/rpc";
+import { type Engine, type SandboxRecord, splitArguments, type UserMode } from "../shared/rpc";
 
 /** An engine, its command, and the parts of a sandbox's profile every engine reads. */
 export interface ContainerPolicy {
@@ -13,8 +13,8 @@ export interface ContainerPolicy {
   network: "host" | "bridge" | "none";
   extraMounts: string;
   extraRunArgs: string;
-  /** Your uid, gid, and home inside, or the image's default user and home. */
-  runAsHostUser: boolean;
+  /** Who runs inside; see UserMode. */
+  user: UserMode;
   /** Mount the agents' own folders; see shareAgentState in the profile. */
   shareAgentState: boolean;
 }
@@ -314,12 +314,12 @@ export function providerDirectories(): string[] {
 /** The environment every engine gives its sandbox, besides what each launch forwards. */
 export function baseEnvironment(
   target: ContainerTarget,
-  runAsHostUser: boolean,
+  asHostUser: boolean,
 ): Array<[string, string]> {
   const { claude } = target;
   const plugins = claude.mode === "private" ? path.join(claude.hostConfigDir, "plugins") : null;
   return [
-    ...(runAsHostUser
+    ...(asHostUser
       ? [
           // HOME keeps the host path so mounted credentials resolve.
           ["HOME", homedir()] as [string, string],
