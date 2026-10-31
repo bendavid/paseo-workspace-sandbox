@@ -21,6 +21,7 @@ import {
   openSandboxShellRpc,
   recreateSandboxRpc,
   restartSandboxRpc,
+  sandboxDependentsRpc,
   relativeWorktreesStatusRpc,
   previewContainerCommandRpc,
   sandboxStatusRpc,
@@ -76,8 +77,11 @@ export default function contribute(server: PluginServerContext) {
     const saved = await containerProfiles.save(profile, makeDefault);
     return { ...containerProfiles.snapshot(), saved };
   });
+  server.handle(sandboxDependentsRpc, async ({ workspaceId }, { paseo }) =>
+    (await resolve(paseo)).dependents(workspaceId, paseo),
+  );
   server.handle(restartSandboxRpc, async ({ workspaceId }, { paseo }) => {
-    await (await resolve(paseo)).restart(workspaceId);
+    await (await resolve(paseo)).restart(workspaceId, paseo);
     return {};
   });
   server.handle(recreateSandboxRpc, async ({ workspaceId, profile }, { paseo }) => {

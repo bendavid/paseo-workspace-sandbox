@@ -18,7 +18,6 @@ import {
   describeProfile,
   enginePersistent,
   listContainerProfilesRpc,
-  restartSandboxRpc,
   type SandboxRecord,
   engineReadsWorkspaceConfig,
   profileSandboxFolder,
@@ -179,17 +178,15 @@ function SavedProfileRecreate({ sandbox, onDone }: { sandbox: SandboxRecord; onD
   );
 }
 
-type ManageDialog = "recreate" | "profile" | null;
+type ManageDialog = "restart" | "recreate" | "profile" | null;
 
 /** Restart, recreate, and changing the sandbox's settings, as its engine allows. */
 function ManageSandbox({ sandbox, theme }: { sandbox: SandboxRecord; theme: PluginTheme }) {
   const queryClient = useQueryClient();
-  const restartSandbox = useRpc(restartSandboxRpc);
   const refresh = useCallback(
     () => queryClient.invalidateQueries({ queryKey: ["status", sandbox.workspaceId] }),
     [queryClient, sandbox.workspaceId],
   );
-  const restart = useMutation({ mutationFn: restartSandbox, onSettled: refresh });
   const [dialog, setDialog] = useState<ManageDialog>(null);
   const [editing, setEditing] = useState<ProfileEditorTarget | null>(null);
   const close = useCallback(() => {
@@ -207,11 +204,9 @@ function ManageSandbox({ sandbox, theme }: { sandbox: SandboxRecord; theme: Plug
         {persistent ? (
           <SettingsAction
             label="Restart"
-            hint="Stops the container and starts it again as it is; running agents and terminals in it stop"
-            actionLabel={restart.isPending ? "Restarting…" : "Restart"}
-            onPress={() => restart.mutate({ workspaceId: sandbox.workspaceId })}
-            disabled={restart.isPending}
-            error={restart.error?.message ?? null}
+            hint="Stops the container and starts it again as it is, then resumes its agents; the workspace's terminals close"
+            actionLabel="Restart…"
+            onPress={() => setDialog("restart")}
           />
         ) : null}
         {persistent ? (
@@ -236,11 +231,20 @@ function ManageSandbox({ sandbox, theme }: { sandbox: SandboxRecord; theme: Plug
         />
       </SettingsCard>
       <Modal
-        title={dialog === "profile" ? "Use another profile" : "Recreate the sandbox?"}
+        title={
+          dialog === "profile"
+            ? "Use another profile"
+            : dialog === "restart"
+              ? "Restart the sandbox?"
+              : "Recreate the sandbox?"
+        }
         open={dialog !== null}
         onOpenChange={openChange}
       >
         <Modal.Content>
+          {dialog === "restart" ? (
+            <RecreateAction sandbox={sandbox} restart onDone={close} />
+          ) : null}
           {dialog === "recreate" ? <RecreateAction sandbox={sandbox} onDone={close} /> : null}
           {dialog === "profile" ? <SavedProfileRecreate sandbox={sandbox} onDone={close} /> : null}
         </Modal.Content>

@@ -558,6 +558,23 @@ export function profileChangeWarnings(
   return warnings;
 }
 
+/**
+ * What restarting or recreating a sandbox affects: the workspace's agents with a live session,
+ * resumed afterwards, and all of its terminals, closed.
+ */
+export const SandboxDependentsSchema = z.object({
+  agents: z.array(z.object({ id: z.string(), title: z.string().nullable(), status: z.string() })),
+  terminals: z.array(z.object({ id: z.string(), name: z.string() })),
+});
+
+export type SandboxDependents = z.infer<typeof SandboxDependentsSchema>;
+
+export const sandboxDependentsRpc = defineRpc({
+  name: "sandbox.dependents",
+  input: z.object({ workspaceId: z.string().min(1) }),
+  output: SandboxDependentsSchema,
+});
+
 /** Stops and starts a workspace's sandbox, for engines that keep one. */
 export const restartSandboxRpc = defineRpc({
   name: "sandbox.restart",

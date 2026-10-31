@@ -39,6 +39,7 @@ import {
   type ImageDownload,
   type PreviewContext,
   type RelativeWorktrees,
+  type SandboxDependents,
   type SandboxHealth,
   type SandboxRecord,
   type createSandboxedWorkspaceRpc,
@@ -142,6 +143,14 @@ async function requireRelativeWorktrees(
   }
 }
 
+interface PendingRestart {
+  paseo: PaseoApi;
+  agents: string[];
+}
+
+/** Agents with a live session; a closed agent opens with the current settings when next used. */
+const LIVE_AGENT_STATUSES = ["initializing", "idle", "running", "error"] as const;
+
 export class SandboxService {
   // In-flight ensureRunning attempts by workspace ID; each resolves to null or why it failed.
   private readonly starting = new Map<string, Promise<string | null>>();
@@ -156,6 +165,11 @@ export class SandboxService {
   private readonly downloading = new Set<string>();
   /** Workspaces this process is creating; their pending records are not leftovers. */
   private readonly creating = new Set<string>();
+  /**
+   * Agents to resume once a changed sandbox runs again, by workspace ID: the next start that
+   * succeeds resumes them, so a start waiting for a download still does.
+   */
+  private readonly pendingRestarts = new Map<string, PendingRestart>();
 
   constructor(
     private readonly store: SandboxStore,
@@ -380,7 +394,10 @@ export class SandboxService {
     if (!record) return Promise.resolve("This workspace is not sandboxed");
     this.failures.delete(workspaceId);
     const task = this.runContainer(record)
-      .then(() => null)
+      .then(() => {
+        void this.runPendingRestarts(workspaceId);
+        return null;
+      })
       .catch((error: unknown) => {
         const message = describeError(error);
         this.failures.set(workspaceId, {
@@ -567,7 +584,7 @@ export class SandboxService {
    * Stops a persistent sandbox and starts it again, as it is. Running agents and terminals in it
    * stop.
    */
-  async restart(workspaceId: string): Promise<void> {
+  async restart(workspaceId: string, paseo: PaseoApi): Promise<void> {
     const record = this.settled(workspaceId);
     await this.starting.get(workspaceId);
     const policy = await this.recordPolicy(record);
@@ -577,6 +594,7 @@ export class SandboxService {
         "This engine starts a fresh sandbox for every launch; there is nothing to restart",
       );
     }
+    await this.prepareRestarts(record, paseo);
     await backend.stop(workspaceTarget(record, { mode: "none" }), policy);
     this.failures.delete(workspaceId);
     void this.ensureRunning(workspaceId);
@@ -597,13 +615,14 @@ export class SandboxService {
     const profile = input
       ? this.containerProfiles.normalize({ ...input, id: input.id ?? record.profile.id })
       : record.profile;
-    if (input && !record.linkedDirectory) {
+    if (input && !record.linkedDirectory && profileSandboxFolder(profile)) {
       await requireRelativeWorktrees(
         profile,
         (await this.gitProject(record.projectId, paseo)).projectRootPath,
       );
     }
     const policy = await this.recordPolicy(record);
+    await this.prepareRestarts(record, paseo);
     await backendFor(policy.engine).remove(workspaceTarget(record, { mode: "none" }), policy);
     await this.store.forgetEnvironment(workspaceId);
     const agentState = profileAgentState(profile);
@@ -618,6 +637,75 @@ export class SandboxService {
     await this.store.put(updated);
     this.failures.delete(workspaceId);
     void this.ensureRunning(workspaceId);
+  }
+
+  /** The workspace's agents with a live session, and its open terminals. */
+  async dependents(workspaceId: string, paseo: PaseoApi): Promise<SandboxDependents> {
+    const record = this.store.get(workspaceId);
+    if (!record) return { agents: [], terminals: [] };
+    const agents: SandboxDependents["agents"] = [];
+    let cursor: string | undefined;
+    do {
+      const { entries, pageInfo } = await paseo.agents.list({
+        includeBackground: true,
+        filter: { statuses: [...LIVE_AGENT_STATUSES], includeBackground: true },
+        page: { limit: 200, ...(cursor ? { cursor } : {}) },
+      });
+      for (const { agent } of entries) {
+        if (agent.workspaceId === workspaceId) {
+          agents.push({ id: agent.id, title: agent.title ?? null, status: agent.status });
+        }
+      }
+      cursor = pageInfo.nextCursor ?? undefined;
+    } while (cursor);
+    const { entries } = await paseo.terminals.list({ workspaceId });
+    const terminals = entries.map(({ id, name }) => ({ id, name }));
+    return { agents, terminals };
+  }
+
+  /**
+   * Before the sandbox changes: closes all of the workspace's terminals, the sandboxed ones running
+   * with the old settings and the host's alike, and notes the live agents to resume once it runs
+   * again.
+   */
+  private async prepareRestarts(record: SandboxRecord, paseo: PaseoApi): Promise<void> {
+    const { agents, terminals } = await this.dependents(record.workspaceId, paseo);
+    for (const terminal of terminals) {
+      await paseo.terminals
+        .ref(terminal.id)
+        .kill()
+        .catch((error: unknown) =>
+          console.error(`Closing terminal ${terminal.id} failed`, describeError(error)),
+        );
+    }
+    this.pendingRestarts.set(record.workspaceId, {
+      paseo,
+      agents: agents.map((agent) => agent.id),
+    });
+  }
+
+  /**
+   * After a changed sandbox runs: resumes its agents, whose session hook then gives them the new
+   * settings. A running turn is interrupted.
+   */
+  private async runPendingRestarts(workspaceId: string): Promise<void> {
+    const pending = this.pendingRestarts.get(workspaceId);
+    if (!pending) return;
+    this.pendingRestarts.delete(workspaceId);
+    for (const agentId of pending.agents) {
+      const agent = pending.paseo.agents.ref(agentId);
+      // Paseo 0.14 added reload; on an older daemon the agents open with the new settings when
+      // next started.
+      if (typeof agent.reload !== "function") {
+        console.error(`Agent ${agentId} was not resumed: reopening sessions needs Paseo 0.14`);
+        continue;
+      }
+      await agent
+        .reload()
+        .catch((error: unknown) =>
+          console.error(`Resuming agent ${agentId} failed`, describeError(error)),
+        );
+    }
   }
 
   /** A sandbox that exists and has finished being created. */

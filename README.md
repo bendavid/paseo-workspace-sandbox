@@ -63,16 +63,22 @@ The Sandbox panel's **Manage** section changes a workspace's own sandbox:
 - **Restart** stops the container or microVM and starts the same one again. **Recreate** removes it
   and creates it from the sandbox's settings again, with the usual image check or dev container
   go-ahead, and reads the login shell environment again; anything installed in it outside its
-  mounts is lost. Both stop running agents and
-  terminals in it. Engines that start a fresh sandbox per launch have neither.
+  mounts is lost. Engines that start a fresh sandbox per launch have neither.
 - **Change settings** edits the sandbox's own copy of its profile, and **Use another profile**
-  replaces it with a copy of a saved one; either recreates the sandbox, or for a per-launch engine
-  applies to new launches. Before you go ahead, the panel lists what the change does to what
-  already ran: a new workspace path inside the sandbox (agents' recorded paths and sessions refer
-  to the old one, so resuming them may fail), another Claude folder (earlier Claude agents can't
-  resume, and Paseo may not show their history), other agents' folders no longer mounted, or
-  another user owning what the sandbox writes. Moving a worktree to sandbox paths offers to switch
-  the repository to relative worktree paths first.
+  replaces it with a copy of a saved one; either recreates the sandbox. The panel lists what the
+  change does to what already ran: a new workspace path inside the sandbox (agents' recorded paths
+  and sessions refer to the old one, so resuming them may fail), another Claude folder (earlier
+  Claude agents can't resume, and Paseo may not show their history), other agents' folders no
+  longer mounted, or another user owning what the sandbox writes. Moving a worktree to sandbox
+  paths offers to switch the repository to relative worktree paths first.
+
+Each of these also stops what runs with the old settings, for every engine, and the go-ahead names
+it first. All of the workspace's terminals close, the sandboxed ones and those on the host such as
+scripts and services, and what runs in them stops; none reopen. The workspace's agents with a live
+session are resumed once the sandbox runs again: Paseo reopens their sessions, which runs the
+plugin's session hook with the new settings, and interrupts a running turn. Closed agents get the
+new settings when next started. When the start waits for a download or dev container go-ahead, the
+agents resume after the start that succeeds. Resuming agents needs Paseo 0.14.
 
 | Engine                  | Sandbox                          | Image            | Network: Host / Separate / None                     | Tested                                  |
 | ----------------------- | -------------------------------- | ---------------- | --------------------------------------------------- | --------------------------------------- |
