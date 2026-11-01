@@ -242,21 +242,22 @@ export function splitArguments(value: string): string[] {
   return words;
 }
 
-export const IMAGE_REFERENCE_HINT =
-  "Use the full image reference, with its registry, such as docker.io/library/node:22";
-
 const SIF_ENGINES: readonly Engine[] = ["apptainer", "singularity"];
 
-/** A full image reference, or for Apptainer and Singularity also the absolute path of a SIF file. */
+/**
+ * An image a profile can name. Podman, Docker, and microsandbox take a short name too, such as
+ * `node:22`, which is resolved to a full reference when a workspace is created. Apptainer and
+ * Singularity take a full reference or the absolute path of a SIF file.
+ */
 export function isValidImage(engine: Engine, image: string): boolean {
-  if (SIF_ENGINES.includes(engine) && image.startsWith("/")) return true;
-  return isFullImageReference(image);
+  if (SIF_ENGINES.includes(engine)) return image.startsWith("/") || isFullImageReference(image);
+  return image !== "" && !/\s/.test(image) && !image.startsWith("/");
 }
 
 export function imageHint(engine: Engine): string {
   return SIF_ENGINES.includes(engine)
-    ? `${IMAGE_REFERENCE_HINT}, or the absolute path of a .sif file`
-    : IMAGE_REFERENCE_HINT;
+    ? "Use the full image reference, with its registry, such as docker.io/library/node:22, or the absolute path of a .sif file"
+    : "Such as node:22 or docker.io/library/node:22; a short name is resolved to its registry when a workspace is created";
 }
 
 /** A saved sandbox configuration. Each workspace keeps a copy of the one it was created with. */

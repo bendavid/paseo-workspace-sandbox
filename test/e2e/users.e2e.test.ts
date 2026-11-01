@@ -10,6 +10,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, describe, expect, test } from "vitest";
 import { backendFor, resolveEngineCli } from "../../server/backends/index";
+import { podmanResolver, resolveImageReference } from "../../server/image-reference";
 import {
   providerDirectories,
   runCli,
@@ -149,4 +150,11 @@ describe.each(ENGINES)("the user in a %s sandbox", (engine) => {
       }
     },
   );
+});
+
+test.skipIf(!clis.podman)("resolves a short name to a local image's full name", async () => {
+  // Podman named the local image itself; a short name finds it before any registry.
+  expect(
+    await resolveImageReference("podman", "node:22-bookworm-slim", podmanResolver(clis.podman)),
+  ).toBe(IMAGE);
 });

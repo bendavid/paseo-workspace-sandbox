@@ -7,6 +7,7 @@ import { prepareClaudeHome } from "./claude-home";
 import { previewCommand, type PreviewWorkspace } from "./command-preview";
 import { backendFor, resolveContainerCli, resolveEngineCli } from "./backends/index";
 import type { ImageStore } from "./backends/types";
+import { podmanResolver, resolveImageReference } from "./image-reference";
 import { checkImage } from "./registry";
 import {
   containerName,
@@ -241,9 +242,13 @@ export class SandboxService {
     context: PreviewContext | undefined,
     paseo: PaseoApi,
   ): Promise<string> {
+    // A short name as creating a workspace would resolve it, or as typed while it can't be.
+    const image = await this.withResolvedImage(profile)
+      .then((resolved) => resolved.image)
+      .catch(() => profile.image);
     return previewCommand({
       policy: await this.policy(profile),
-      image: profile.image,
+      image,
       sandboxFolder: profileSandboxFolder(profile),
       workspace: await this.previewWorkspace(context, paseo),
       paths: {
@@ -471,9 +476,22 @@ export class SandboxService {
     return project;
   }
 
+  /**
+   * A profile with its image as the engine would resolve it here: a short name gets its registry,
+   * so the sandbox's copy, its download consent, and its freshness check name it.
+   */
+  private async withResolvedImage<Profile extends Omit<ContainerProfile, "id">>(
+    profile: Profile,
+  ): Promise<Profile> {
+    if (!engineUsesImage(profile.engine)) return profile;
+    const cli = await resolveEngineCli(profile.engine, profile.cli).catch(() => null);
+    const image = await resolveImageReference(profile.engine, profile.image, podmanResolver(cli));
+    return { ...profile, image };
+  }
+
   /** Validates the request and resolves everything creation needs, before anything exists. */
   private async planCreation(input: CreateInput, paseo: PaseoApi) {
-    const profile = this.containerProfiles.get(input.profileId);
+    const profile = await this.withResolvedImage(this.containerProfiles.get(input.profileId));
     const project = await this.project(input.projectId, paseo);
     const isGit = project.projectKind === "git";
     const isolation = input.isolation ?? (isGit ? "worktree" : "directory");
@@ -551,7 +569,8 @@ export class SandboxService {
 
   /** A profile's image and how it compares with its registry; null for engines without images. */
   async imageStatus(profileId: string | undefined): Promise<RpcOutput<typeof imageStatusRpc>> {
-    const profile = this.containerProfiles.get(profileId);
+    // The image creating a workspace now would use, short names resolved.
+    const profile = await this.withResolvedImage(this.containerProfiles.get(profileId));
     const { images } = backendFor(profile.engine);
     // A local image file is never downloaded; a missing one fails when the sandbox starts.
     if (!images || images.pullable?.(profile.image) === false) {
@@ -612,8 +631,11 @@ export class SandboxService {
   ): Promise<void> {
     const record = this.settled(workspaceId);
     await this.starting.get(workspaceId);
+    // New settings make a new copy, its image resolved as at creation.
     const profile = input
-      ? this.containerProfiles.normalize({ ...input, id: input.id ?? record.profile.id })
+      ? await this.withResolvedImage(
+          this.containerProfiles.normalize({ ...input, id: input.id ?? record.profile.id }),
+        )
       : record.profile;
     if (input && !record.linkedDirectory && profileSandboxFolder(profile)) {
       await requireRelativeWorktrees(
@@ -693,14 +715,8 @@ export class SandboxService {
     if (!pending) return;
     this.pendingRestarts.delete(workspaceId);
     for (const agentId of pending.agents) {
-      const agent = pending.paseo.agents.ref(agentId);
-      // Paseo 0.14 added reload; on an older daemon the agents open with the new settings when
-      // next started.
-      if (typeof agent.reload !== "function") {
-        console.error(`Agent ${agentId} was not resumed: reopening sessions needs Paseo 0.14`);
-        continue;
-      }
-      await agent
+      await pending.paseo.agents
+        .ref(agentId)
         .reload()
         .catch((error: unknown) =>
           console.error(`Resuming agent ${agentId} failed`, describeError(error)),

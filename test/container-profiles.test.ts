@@ -62,15 +62,21 @@ test("creates a Default profile on first start and keeps at least one", async ()
   expect(reloaded.snapshot()).toEqual(store.snapshot());
 });
 
-test("requires a full image reference for engines that run one", async () => {
+test("requires an image for engines that run one, short names kept as typed", async () => {
   const store = new ContainerProfiles(await directory());
   await store.load();
   const values = { network: "host", extraMounts: "", extraRunArgs: "" } as const;
   await expect(
     store.save({ name: "No image", engine: "docker", image: "", ...values }, false),
   ).rejects.toThrow(/needs an image/);
+  // Resolved to a full reference when a workspace is created, not here.
+  const short = await store.save(
+    { name: "Short", engine: "podman", image: "node:22", ...values },
+    false,
+  );
+  expect(short.image).toBe("node:22");
   await expect(
-    store.save({ name: "Short", engine: "podman", image: "node:22", ...values }, false),
+    store.save({ name: "Short", engine: "apptainer", image: "node:22", ...values }, false),
   ).rejects.toThrow(/full image reference/);
   const bubblewrap = await store.save(
     { name: "Host system", engine: "bubblewrap", image: "", ...values },

@@ -35,7 +35,7 @@ From Git:
 paseo plugin add git:bendavid/paseo-workspace-sandbox
 ```
 
-The plugin needs Paseo 0.13.0 or later and one of the [engines](#container-profiles-and-engines)
+The plugin needs Paseo 0.14.0 or later and one of the [engines](#container-profiles-and-engines)
 on the daemon's machine. It has been tested on Linux.
 
 Installing it edits daemon configuration: the first time each provider runs in a sandbox, the
@@ -78,7 +78,7 @@ scripts and services, and what runs in them stops; none reopen. The workspace's 
 session are resumed once the sandbox runs again: Paseo reopens their sessions, which runs the
 plugin's session hook with the new settings, and interrupts a running turn. Closed agents get the
 new settings when next started. When the start waits for a download or dev container go-ahead, the
-agents resume after the start that succeeds. Resuming agents needs Paseo 0.14.
+agents resume after the start that succeeds.
 
 | Engine                  | Sandbox                          | Image            | Network: Host / Separate / None                     | Tested                                  |
 | ----------------------- | -------------------------------- | ---------------- | --------------------------------------------------- | --------------------------------------- |
@@ -287,9 +287,19 @@ read-only if either is.
 
 ### Image
 
-Engines other than Bubblewrap run an image, given as a full reference that names its registry
-(`docker.io/library/node:22`, `localhost/agents`): engines resolve short names differently, and
-the download confirmation shows exactly what is fetched.
+Engines other than Bubblewrap run an image. Podman, Docker, and microsandbox profiles may name it
+by a short name such as `node:22`, which creating a workspace resolves to a full reference, stored
+in the sandbox's copy of its profile: the download confirmation and the freshness check then name
+exactly what is fetched, whichever engine runs it. Profiles keep what you typed, so each new
+workspace resolves it again; the Start command box shows what it resolves to now. The rules:
+
+- Docker and microsandbox put a short name on Docker Hub, as Docker does: `node:22` is
+  `docker.io/library/node:22`, `acme/agents` is `docker.io/acme/agents`.
+- Podman follows its own order: a local image of that name (`localhost/agents` for one you built),
+  then the aliases in `registries.conf`, then its search registry when there is only one. Where
+  several registries could serve the name, Podman would ask, and creating the workspace fails with
+  that message instead; give the full reference then.
+- Apptainer and Singularity take a full reference or the absolute path of a `.sif` file.
 
 Sandboxes are created from the current version of their image, and nothing downloads an image
 without your go-ahead. Every run and create passes `--pull never`, and the plugin pulls only after
