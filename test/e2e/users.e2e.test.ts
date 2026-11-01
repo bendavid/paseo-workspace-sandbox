@@ -54,7 +54,7 @@ const REPORT = [
   'echo "passwdOwner=$(stat -c %u /etc/passwd)"',
   'echo "rootWritable=$(touch /usr/.paseo-probe 2>/dev/null && echo yes || echo no)"',
   'echo "homeWritable=$(touch "$HOME/.paseo-probe" 2>/dev/null && echo yes || echo no)"',
-  'echo "memoryWritable=$(touch /tmp/p /var/tmp/p /run/p /dev/shm/p 2>/dev/null && echo yes || echo no)"',
+  'echo "scratchWritable=$(touch /tmp/p /var/tmp/p /run/p /dev/shm/p 2>/dev/null && echo yes || echo no)"',
 ].join("\n");
 
 const CASES: Array<[string, UserMode, AgentState]> = [
@@ -116,13 +116,13 @@ describe.each(ENGINES)("the user in a %s sandbox", (engine) => {
           expect(groups.toSorted()).toEqual([...new Set(process.getgroups?.() ?? [])].toSorted());
         }
         if (user === "squashed") {
-          // Only your uid exists inside; the root is read-only and HOME is writable memory.
+          // Only your uid exists inside; the root is read-only, and HOME and the scratch folders writable.
           expect(report).toMatchObject({
             ids: "1",
             passwdOwner: String(account.uid),
             rootWritable: "no",
             homeWritable: "yes",
-            memoryWritable: "yes",
+            scratchWritable: "yes",
           });
         }
         if (asHostUser) {
@@ -141,10 +141,30 @@ describe.each(ENGINES)("the user in a %s sandbox", (engine) => {
           if (codex) expect(report.codex).toBe(agentState === "shared" ? codex : "");
         }
         // A restart stops the sandbox and starts the same one again.
+        const squashed = user === "squashed";
+        if (squashed) await runCli(cli!, ["exec", target.container, "touch", "/tmp/kept"]);
         await backend.stop!(target, policy);
         expect(await backend.status(target, policy)).toEqual({ state: "stopped" });
         await backend.start(target, policy);
         expect(await backend.status(target, policy)).toEqual({ state: "running" });
+        if (squashed) {
+          // The scratch folders are the container's anonymous volumes: kept, then removed with it.
+          await runCli(cli!, ["exec", target.container, "test", "-e", "/tmp/kept"]);
+          const volumes = (
+            await runCli(cli!, [
+              "inspect",
+              "--format",
+              '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}',
+              target.container,
+            ])
+          )
+            .trim()
+            .split(" ");
+          expect(volumes).toHaveLength(4);
+          await backend.remove(target, policy);
+          const left = await runCli(cli!, ["volume", "ls", "--quiet"]);
+          expect(left.split("\n").filter((name) => volumes.includes(name))).toEqual([]);
+        }
       } finally {
         await backend.remove(target, policy).catch(() => undefined);
       }

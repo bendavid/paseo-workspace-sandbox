@@ -260,9 +260,10 @@ host user turned off.
   can enter, such as the shared Claude entries in a workspace's private Claude folder; with
   keep-id, those fail when the folder is on NFS. Nothing inside can act as root, and the image's
   files appear as yours, so the root file system is read-only. `/tmp`, `/var/tmp`, `/run`,
-  `/dev/shm`, and `HOME` (unless a mount covers it) are in memory, start empty, and are emptied when
-  the sandbox stops; Podman's own read-only setup would copy the image's `/run` in, which fails for
-  images with files there owned by system users. Your account comes from `--passwd-entry` and
+  and `HOME` (unless a mount covers it) are anonymous volumes: they start with the image's contents,
+  keep theirs when the sandbox restarts, and are deleted with the sandbox when it is recreated or
+  its workspace archived. Podman's own read-only setup would put these in memory, and fails for
+  images with files in `/run` owned by system users. `/dev/shm` stays in memory. Your account comes from `--passwd-entry` and
   `--group-entry`, which Podman applies only when the image has no account for your uid, so use
   images without one. An own network namespace also gets
   `--sysctl net.ipv4.ping_group_range=<gid> <gid>`, since Podman's default of `0 0` fails while

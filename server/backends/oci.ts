@@ -40,10 +40,12 @@ function squashedIdentity(network: ContainerPolicy["network"]): string[] {
 
 /**
  * Squashed: a read-only root, since nothing in it can act as root and the image's files appear as
- * yours, with /tmp, /var/tmp, /run, /dev/shm, and HOME (unless a mount provides it) in memory.
- * They start empty: Podman's own read-only tmpfs copies the image's /run in and fails on files
- * there owned by ids that are not mapped, such as dbus's. Podman adds your account for a uid the
- * image has no account for; it leaves an existing one alone, and nothing inside could change it.
+ * yours. /tmp, /var/tmp, /run, and HOME (unless a mount provides it) are anonymous volumes, on disk
+ * with the container: they keep their contents across a restart and go with it (`rm -v`, `--rm`).
+ * Podman copies the image's folder into a volume; its read-only tmpfs would copy /run too, but fails
+ * on files there owned by ids that are not mapped, such as dbus's. /dev/shm stays in memory. Podman
+ * adds your account for a uid the image has no account for; it leaves an existing one alone, and
+ * nothing inside could change it.
  */
 async function squashedOptions(policy: ContainerPolicy, mountPaths: string[]): Promise<string[]> {
   const [name, uid, gid, group, home] = await hostAccount();
@@ -54,17 +56,14 @@ async function squashedOptions(policy: ContainerPolicy, mountPaths: string[]): P
     ...squashedIdentity(policy.network),
     "--read-only",
     "--read-only-tmpfs=false",
-    ...["/tmp", "/var/tmp", "/dev/shm"].flatMap((folder) => [
-      "--tmpfs",
-      `${folder}:notmpcopyup,mode=1777`,
-    ]),
+    ...["/tmp", "/var/tmp", "/run"].flatMap((folder) => ["-v", folder]),
     "--tmpfs",
-    "/run:notmpcopyup",
+    "/dev/shm:notmpcopyup,mode=1777",
     "--passwd-entry",
     `${name}:x:${uid}:${gid}::${home}:/bin/sh`,
     "--group-entry",
     `${group}:x:${gid}:${name}`,
-    ...(homeMounted ? [] : ["--tmpfs", `${home}:notmpcopyup,mode=0700`]),
+    ...(homeMounted ? [] : ["-v", home!]),
   ];
 }
 
@@ -226,7 +225,8 @@ export const ociBackend: SandboxBackend = {
 
   async remove(target, policy) {
     try {
-      await runCli(policy.cli, ["rm", "-f", target.container]);
+      // With its anonymous volumes: a squashed sandbox's folders and any the image declares.
+      await runCli(policy.cli, ["rm", "-f", "-v", target.container]);
     } catch (error) {
       if ((await inspect(policy.cli, target.container)).state !== "missing") throw error;
     }

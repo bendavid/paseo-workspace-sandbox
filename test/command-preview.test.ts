@@ -118,6 +118,8 @@ test("shows a squashed Podman sandbox's identity, read-only root, and private ne
   expect(command).toContain(`--uidmap ${uid}:0:1`);
   expect(command).toContain(`--sysctl 'net.ipv4.ping_group_range=${gid} ${gid}'`);
   expect(command).toContain("--read-only \\");
+  expect(command).toContain("-v /tmp \\");
+  expect(command).toContain("-v /run \\");
   expect(command).toContain("--label paseo.workspace-sandbox.workspace=<workspace-id>");
 });
 
