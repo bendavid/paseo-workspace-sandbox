@@ -6,14 +6,18 @@ Docker container, a microsandbox microVM, or a Bubblewrap sandbox built from the
 
 ![A sandboxed terminal running Debian in a Podman container, with the sandbox's terminal menu open](assets/screenshot-terminal-light.png)
 
-- **New sandboxed workspace** (sidebar header, Command Center, or the workspace command that
-  preselects the current project) creates a workspace in a new worktree or the project directory,
-  with a [container profile](#container-profiles-and-engines), and opens it at once. Its sandbox
-  starts in the background.
+- The **Sandbox** field on Paseo's New workspace screen picks a
+  [container profile](#container-profiles-and-engines) for the workspace, a new worktree or Local,
+  and the agent you start with it. The workspace opens at once and its sandbox starts in the
+  background; see [The Sandbox field](#the-sandbox-field). **Sandbox new workspaces by default**,
+  in the plugin's settings, starts the field with the default profile.
 - Agents start from the workspace's own composer, with attachments, modes, and commands. Each one
   switches to a sandboxed copy of the provider it asked for, such as `claude-sandbox` or
   `zai-sandbox`; see [Provider profiles](#provider-profiles). Sessions, permissions, and history
   work as usual.
+- Sandboxed workspaces show the sandbox's state in the sidebar, under their title, and on the
+  header button, colored by state: the accent while starting, green when ready, amber when the host
+  needs a sign-in, red when the start failed.
 - The **Sandboxed** header button opens the Sandbox panel: the sandbox's configuration, its Claude
   folder and sign-in, and **Open sandboxed terminal**. The terminal button beside it opens a menu of
   a shell and your terminal profiles, run in the sandbox.
@@ -35,7 +39,7 @@ From Git:
 paseo plugin add git:bendavid/paseo-workspace-sandbox
 ```
 
-The plugin needs Paseo 0.14.0 or later and one of the [engines](#container-profiles-and-engines)
+The plugin needs Paseo 0.16.0 or later and one of the [engines](#container-profiles-and-engines)
 on the daemon's machine. It has been tested on Linux.
 
 Installing it edits daemon configuration: the first time each provider runs in a sandbox, the
@@ -47,13 +51,15 @@ remove the plugin, delete the `*-sandbox` profiles from `config.json`, then dele
 ## Container profiles and engines
 
 A profile is a saved sandbox configuration: engine and its command, image, network, extra mounts,
-and extra run arguments. A new workspace copies the profile chosen in the form, so editing or
-deleting a profile never changes an existing sandbox; the Sandbox panel shows the copy. The form's
-**Container** dropdown has **New profile** (prefilled from the selected one) and **Edit**, and
-Settings > Sandbox lists the profiles. The profile editor shows the **Start command** the
-settings produce, built by the same code that starts sandboxes. Opened from the form it shows the
-chosen project's real paths, for a worktree or a sandboxed directory as chosen; from the Sandbox
-panel, that sandbox's own paths and name; from Settings, a plain checkout. Placeholders such as
+and extra run arguments. A new workspace copies the profile chosen in the Sandbox field, so
+editing or deleting a profile never changes an existing sandbox; the Sandbox panel shows the copy.
+**Manage profiles…** at the end of the Sandbox field's list lists, adds, and edits them in a
+dialog over the New workspace screen, which keeps its choices; a profile added there is selected.
+The plugin's settings (Settings > Plugins > Workspace Sandbox) have the same list. The profile editor shows the **Start command** the settings
+produce, built by the same code that starts sandboxes: from the Sandbox panel, with that sandbox's
+own paths and name; from Settings, for a plain checkout. **Show sandbox command**, beside the Sandbox
+field once a profile is chosen, shows it for the new workspace: the chosen project's real paths, for a
+worktree or a Local workspace as chosen. Placeholders such as
 `<worktree>` or `<workspace-id>` stand for what creating the workspace decides. The first profile uses Podman, or Docker when only Docker is
 installed, with a separate network. Profiles live in `container-profiles.json` in the plugin's data
 folder.
@@ -314,13 +320,16 @@ the local copy with the registry:
   settles it. microsandbox records this platform's manifest digest, so when the index digest does
   not match, the plugin reads the index once to find this platform's entry. A `@sha256:` reference
   needs no request.
-- A missing or outdated image waits for your go-ahead. In the form, Create asks first: **Create
-  workspace and download `<image>`** (or **update**), for an outdated image **Create workspace with
-  the local image**, or Cancel, which creates and downloads nothing. When a sandbox is recreated
+- A missing or outdated image waits for your go-ahead. Picking a profile in the Sandbox field asks
+  first: **Download `<image>`** (or **Update**), for an outdated image **Use the local image**, or
+  Cancel, which takes the sandbox off the new workspace and downloads nothing. A download starts at
+  once, shown beside the field and ended with a notice, so later workspaces find the image
+  current; a sandbox that starts meanwhile waits for it. **Use the local image** covers that new
+  workspace's first start only, so the next one asks again. When a sandbox is recreated
   later, its start fails without downloading, and the Sandbox panel offers **Download** or
-  **Update `<image>`**, and **Use the local image** for an outdated one. Each answer covers that
-  one start and is never stored, so retries, daemon restarts, and agent launches never download
-  and a later recreation asks again.
+  **Update `<image>`**, and **Use the local image** for an outdated one. Each answer covers one
+  start, so retries, daemon restarts, and agent launches never download and a later recreation
+  asks again.
 - When the registry can't be reached or needs credentials, a local image is used as it is, as is a
   `localhost/` image or one built locally.
 
@@ -468,7 +477,7 @@ The plugin alone starts, recreates, and waits for sandboxes; `sandbox-run` only 
 one. One start per workspace runs at a time, and everything that needs the sandbox joins it:
 
 - Creating a workspace starts the first one, which also decides the Claude folder.
-- The `agent.session_open` hook waits up to 25 of its 30 seconds before every agent launch: the
+- The `agent.open.before` hook waits up to 25 of its 30 seconds before every agent launch: the
   daemon needs the session's `CLAUDE_CONFIG_DIR` before the session starts.
 - Opening a sandboxed terminal waits up to 45 seconds of the RPC's 60.
 - Starting a stopped container, such as after a reboot, takes a second or two. Only an image
@@ -488,12 +497,15 @@ runtime ID, so the folder uses the manifest ID: install it once per daemon. Remo
 leaves the folder, and the provider profiles still point at `sandbox-run`, so sandboxed agents keep
 failing closed.
 
-| Launch                       | Sandbox from                                              | Without a sandbox            |
-| ---------------------------- | --------------------------------------------------------- | ---------------------------- |
-| Agent session                | `PASEO_SANDBOX_WORKSPACE_ID`, set by `agent.session_open` | Fails (`PASEO_AGENT_ID` set) |
-| History of an archived agent | `PASEO_SANDBOX_ROUTE=host`, set by `agent.session_open`   | Host CLI                     |
-| Model or version check       | none                                                      | Host CLI                     |
-| Sandboxed terminal           | `PASEO_WORKSPACE_ID`, set on every terminal               | Fails                        |
+| Launch                       | Sandbox from                                             | Without a sandbox            |
+| ---------------------------- | -------------------------------------------------------- | ---------------------------- |
+| Agent session                | `PASEO_SANDBOX_WORKSPACE_ID`, set by `agent.open.before` | Fails (`PASEO_AGENT_ID` set) |
+| History of an archived agent | `PASEO_SANDBOX_ROUTE=host`, set by `agent.open.before`   | Host CLI                     |
+| Model or version check       | none                                                     | Host CLI                     |
+| Sandboxed terminal           | `PASEO_WORKSPACE_ID`, set on every terminal              | Fails                        |
+
+Paseo also sets `PASEO_WORKSPACE_ID` for every agent. An agent session whose
+`PASEO_SANDBOX_WORKSPACE_ID` names another workspace's sandbox fails.
 
 The spec holds the engine's part of `sandbox-run`: a few shell functions (ready, ID, run a command
 inside, signal), documented at the top of `server/wrapper.ts`. Killing a long-lived engine's `exec`
@@ -502,13 +514,13 @@ client does not stop the process inside, so the wrapper records the inner pid an
 
 ### Sandboxed directories
 
-**Sandboxed directory** is the sandboxed counterpart of New workspace's "Local": a workspace on the
-project directory, titled `<project> (sandboxed)` unless you name it. Projects that are not Git
-repositories always get one. It shares the project directory with the project's other workspaces by
-design, so its sandbox does not protect `.git` the way a sandboxed worktree's does.
+A sandboxed **Local** workspace is on the project directory, titled `<project> (sandboxed)` unless
+you name it or start it with a prompt. Projects that are not Git repositories only have Local. It
+shares the project directory with the project's other workspaces by design, so its sandbox does not
+protect `.git` the way a sandboxed worktree's does.
 
-The workspace lives at its own link to the project directory, `links/<workspace id>` in the
-plugin's data folder, and Paseo shows that path as its directory. The plugin's hooks only see an
+The workspace lives at its own link to the project directory, `links/<name>` in the plugin's data
+folder, and Paseo shows that path as its directory. The plugin's hooks only see an
 agent's directory when it is created, and commit-message and similar helpers only get a directory,
 so the link is what tells the sandboxed workspace's agents and helpers apart from the project's
 other workspaces, and two sandboxed directories on one project from each other. Agents of the other
@@ -518,17 +530,41 @@ Inside the sandbox the project is mounted at the link path, where the agent runs
 path, so files that contain the real path keep working: virtual environments, absolute symlinks,
 build caches. An extra mount that covers the plugin's data folder, such as `~:ro`, would show the
 link there as a symlink, and engines follow a symlink at a mount's destination; each sandbox
-mounts its own `link-mounts/<workspace id>` over `links/`, so the link path stays a plain mount
+mounts its own `link-mounts/<name>` over `links/`, so the link path stays a plain mount
 point. Archiving the workspace removes the link.
 
 Sandboxed directories created before links use the project directory itself. There, an agent of
 an unsandboxed workspace in that directory still gets the sandboxed provider at creation, and the
 session hook, which sees the workspace, runs it on the host, labelled as sandboxed (for example
 "Claude Code (sandboxed)"), with Paseo tools disabled and, for ACP providers, Paseo's terminal and
-file access off. When the daemon passes no workspace (agents saved without one, or a session
-resumed through the SDK's `resumeAgent`), the directory decides and the agent stays sandboxed. An
-agent whose workspace had a sandbox that is gone shows its history but does not run again; the
-plugin remembers removed sandboxes in `state.json` for this.
+file access off.
+
+Each agent that runs in a sandbox is marked with it in its metadata (`workspace-sandbox`). When the
+daemon passes no workspace (agents saved without one, or a session resumed through the SDK's
+`resumeAgent`), the marker names it, and for agents from before markers the directory decides, so
+the agent stays sandboxed. An agent whose workspace had a sandbox that is gone shows its history but
+does not run again. The marker and the removed sandboxes the plugin remembers in `state.json` both
+record this, so losing either still fails closed.
+
+### The Sandbox field
+
+The **Sandbox** field on Paseo's New workspace screen stores the chosen container profile, and your
+answer about its image, in the new workspace's metadata under `workspace-sandbox`. The plugin's
+hooks act on it:
+
+- `workspace.create.before` checks the profile and its image, and for a worktree at sandbox paths,
+  that the repository uses relative worktree paths; the field offers the switch as soon as you pick
+  such a profile. A Local workspace is created at a link of its own; see
+  [Sandboxed directories](#sandboxed-directories).
+- `workspace.create.after` adds the sandbox and starts it in the background. Paseo does not wait
+  for this hook, so `agent.create.before` waits for a sandbox being added at the agent's
+  directory, and for two minutes after such a request looks for a workspace there whose metadata
+  asks for one.
+
+A workspace whose metadata asks for a sandbox it doesn't have, because adding it failed or the
+plugin wasn't running, gets it when the plugin starts and before any of its agents opens. If the
+sandbox can't be added, the workspace's agents don't start. A dev container's go-ahead is given in
+the Sandbox panel, before its first start.
 
 ## Not sandboxed
 
@@ -555,17 +591,15 @@ cannot run outside one; both fail with an explanation.
 - A terminal creation hook, so Paseo's own terminals, scripts, and setup could run in the sandbox.
 - A provider launch hook, so sandboxing a provider would not need a visible derived profile, and the
   requested provider would not have to be available on the host.
-- `agent.create` hooks that receive the agent's workspace, so routing would not depend on
-  directories, and sandboxed directories would not need links.
-- `agent.session_open` telling internal helpers apart, with the workspace they work for, so the
+- `agent.create.before` hooks that receive the agent's workspace, so routing would not depend on
+  directories, sandboxed directories would not need links, and the first agent of a workspace from
+  the New workspace screen would not wait for a hook Paseo does not await.
+- `agent.open.before` telling internal helpers apart, with the workspace they work for, so the
   plugin could run a sandboxed workspace's commit-message and similar helpers in its sandbox.
-- `before("workspace.create")` with the workspace ID the daemon allocates, so Paseo's own New
-  workspace form could create sandboxed workspaces.
-- A slot in the New workspace form, or access to the app's composer and combobox, instead of a
-  rebuilt form that cannot start agents.
+- A way to open Paseo's New workspace screen with the Sandbox field set, for a one-step "new
+  sandboxed workspace" entry point in the sidebar or Command Center.
 - A way to push state to the app and to focus a terminal; start failures are polled, and new
   sandboxed terminals open as background tabs.
-- Workspace labels in the plugin SDK, to mark sandboxed workspaces in the sidebar.
 - A Paseo session in the server entry. The plugin finishes starting on the first RPC or hook, which
   the client entry triggers when an app connects.
 

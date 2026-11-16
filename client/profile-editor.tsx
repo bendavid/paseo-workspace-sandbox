@@ -14,7 +14,7 @@ import {
 import { useCallback, useMemo, useState } from "react";
 import { Text, View } from "react-native";
 import { RecreateAction } from "./recreate";
-import { FONT } from "./standard-ui";
+import { FONT } from "./dialog-styles";
 import {
   DEFAULT_IMAGE,
   DEFAULT_SANDBOX_FOLDER,
@@ -169,10 +169,10 @@ interface ProfileEditorProps {
   onSaved(profile: ContainerProfile | null): void;
 }
 
-type Draft = Omit<ContainerProfile, "id">;
+export type Draft = Omit<ContainerProfile, "id">;
 
 /** The editable fields only: the ID comes from the target on save, so a copy never reuses it. */
-function fields(profile: ContainerProfile): Draft {
+export function fields(profile: ContainerProfile): Draft {
   return {
     name: profile.name,
     engine: profile.engine,
@@ -200,7 +200,7 @@ function initialDraft(target: ProfileEditorTarget | null): Draft {
   return target.from ? { ...fields(target.from), name: `${target.from.name} copy` } : BLANK;
 }
 
-function targetKey(target: ProfileEditorTarget): string {
+export function targetKey(target: ProfileEditorTarget): string {
   if (target.mode === "sandbox") return `sandbox:${target.sandbox.workspaceId}`;
   return target.mode === "edit" ? `edit:${target.profile.id}` : `new:${target.from?.id ?? ""}`;
 }
@@ -260,7 +260,7 @@ const PREVIEW_HINTS: Record<PreviewContext["kind"] | "generic", string> = {
  * What starting a sandbox from the draft runs, built by the engine code itself on the host, with
  * placeholders for the paths each workspace fills in.
  */
-function CommandPreview({
+export function CommandPreview({
   draft,
   theme,
   context,
@@ -311,7 +311,7 @@ function CommandPreview({
   );
 }
 
-function EditorForm({
+export function EditorForm({
   target,
   theme,
   context,

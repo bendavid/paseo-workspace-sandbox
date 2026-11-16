@@ -1,53 +1,15 @@
-import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
-import { SidebarRow } from "@getpaseo/plugin/client/ui";
-import { useCallback } from "react";
+import type {
+  PluginClientContext,
+  PluginWorkspaceRowBadgeItemProps,
+} from "@getpaseo/plugin/client";
 import { contributeHeaderBadges } from "./client/header-badges";
-import { NewSandboxedWorkspaceScreen } from "./client/new-workspace-screen";
+import { NewWorkspaceSandboxField } from "./client/new-workspace-field";
 import { SandboxPanel } from "./client/sandbox-panel";
+import { SandboxBadges } from "./client/sandbox-state";
 import { SandboxSettingsScreen } from "./client/settings-screen";
-
-function NewSandboxedWorkspaceItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
-  const open = useCallback(() => openScreen({ screenId: "new-workspace" }), [openScreen]);
-  return (
-    <SidebarRow icon="Box" active={currentScreen?.screenId === "new-workspace"} onPress={open} />
-  );
-}
+import { SandboxRowBadge } from "./client/workspace-row-badge";
 
 export default function contribute(client: PluginClientContext) {
-  // The body carries "New sandboxed workspace" as New workspace does; the host header names the
-  // plugin so the two titles do not repeat.
-  client.addScreen({
-    id: "new-workspace",
-    title: "Workspace sandbox",
-    Component: NewSandboxedWorkspaceScreen,
-  });
-  // Project rows have no plugin slot, so the entry points are the sidebar header, the Command
-  // Center, and a workspace-context command that preselects the current project.
-  client.addSidebarHeaderItem({
-    id: "new-workspace",
-    title: "New sandboxed workspace",
-    Component: NewSandboxedWorkspaceItem,
-  });
-  client.addCommandCenterItem({
-    id: "new-workspace",
-    title: "New sandboxed workspace",
-    icon: "Box",
-    keywords: ["sandbox", "container"],
-    context: "global",
-    onSelect({ openScreen }) {
-      openScreen({ screenId: "new-workspace" });
-    },
-  });
-  client.addCommandCenterItem({
-    id: "new-workspace-in-project",
-    title: "New sandboxed workspace in this project",
-    icon: "Box",
-    keywords: ["sandbox", "container"],
-    context: "workspace",
-    onSelect({ openScreen, workspace }) {
-      openScreen({ screenId: "new-workspace", params: { projectId: workspace.projectId } });
-    },
-  });
   client.addWorkspacePanel({
     id: "sandbox",
     title: "Sandbox",
@@ -70,5 +32,25 @@ export default function contribute(client: PluginClientContext) {
     icon: "Box",
     Component: SandboxSettingsScreen,
   });
-  return contributeHeaderBadges(client);
+  // Sandboxed workspaces are made on Paseo's own New workspace screen, with this field.
+  const removeField = client.addNewWorkspaceItem({
+    id: "sandbox",
+    Component: NewWorkspaceSandboxField,
+  });
+  // One list per host feeds both the header buttons and the sidebar rows.
+  const badges = new SandboxBadges();
+  const removeRowBadge = client.addWorkspaceRowBadgeItem({
+    id: "sandbox",
+    title: "Sandbox",
+    icon: "Box",
+    Component: function RowBadge(props: PluginWorkspaceRowBadgeItemProps) {
+      return <SandboxRowBadge {...props} badges={badges} />;
+    },
+  });
+  const removeHeaderBadges = contributeHeaderBadges(client, badges);
+  return () => {
+    removeField();
+    removeRowBadge();
+    removeHeaderBadges();
+  };
 }

@@ -12,11 +12,9 @@
     "assets/screenshot-terminal-light.png",
     "assets/screenshot-terminal-dark.png",
     "assets/screenshot-panel-light.png",
-    "assets/screenshot-panel-dark.png",
-    "assets/screenshot-form-light.png",
-    "assets/screenshot-form-dark.png"
+    "assets/screenshot-panel-dark.png"
   ],
   "requirements": {
-    "paseo": ">=0.14.0"
+    "paseo": ">=0.16.0"
   }
 }

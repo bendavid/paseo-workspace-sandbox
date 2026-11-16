@@ -1,11 +1,44 @@
 import { existsSync } from "node:fs";
 import type { PaseoApi } from "./paseo";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import {
+  AgentSandboxMarkerSchema,
+  SANDBOX_METADATA_KEY,
+  WorkspaceSandboxRequestSchema,
+  type AgentSandboxMarker,
+  type WorkspaceSandboxRequest,
+} from "../shared/rpc";
 import type { ClaudeLoginKeeper } from "./claude-login";
 import { CONTAINED_ACP_CAPABILITIES, type ProfileManager } from "./profiles";
 import type { SandboxService } from "./service";
-import { routeSession } from "./session-route";
+import { agentWorkspaceId, routeSession } from "./session-route";
 import type { SandboxStore } from "./store";
+
+type Metadata = Readonly<Record<string, unknown>> | undefined;
+
+function sandboxMarker(metadata: Metadata): AgentSandboxMarker | null {
+  const parsed = AgentSandboxMarkerSchema.safeParse(metadata?.[SANDBOX_METADATA_KEY]);
+  return parsed.success ? parsed.data : null;
+}
+
+function sandboxRequest(metadata: Metadata): WorkspaceSandboxRequest | null {
+  const parsed = WorkspaceSandboxRequestSchema.safeParse(metadata?.[SANDBOX_METADATA_KEY]);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * Records on the agent the sandbox it runs in, so it never reopens outside it: not when the
+ * daemon opens it without its workspace, and not when the plugin's own records are gone.
+ */
+function markSandboxed(paseo: PaseoApi, agentId: string, workspaceId: string): void {
+  const marker: AgentSandboxMarker = { workspaceId };
+  void paseo.agents
+    .ref(agentId)
+    .setMetadata({ [SANDBOX_METADATA_KEY]: marker })
+    .catch((error: unknown) =>
+      console.error(`Marking agent ${agentId} as sandboxed failed`, error),
+    );
+}
 
 export function registerHooks(input: {
   server: PluginServerContext;
@@ -15,16 +48,33 @@ export function registerHooks(input: {
 }): Array<() => void> {
   const { server, store, loaded, resolve } = input;
   return [
+    // A sandbox chosen on Paseo's New workspace screen: refuse the workspace now if the sandbox
+    // could not run it, rather than after it exists.
+    server.addHook("workspace.create.before", async ({ request }, { paseo }) => {
+      const sandbox = sandboxRequest(request.metadata);
+      if (!sandbox) return undefined;
+      return (await resolve(paseo)).prepareWorkspaceRequest(request, sandbox, paseo);
+    }),
+
+    server.addHook("workspace.create.after", async ({ workspace }, { paseo }) => {
+      const sandbox = sandboxRequest(workspace.metadata);
+      if (!sandbox) return;
+      await (await resolve(paseo)).adoptWorkspace(workspace, sandbox);
+    }),
+
     // Route every new agent in a sandboxed workspace to a sandboxed profile of the provider it
     // asked for, derived from that provider's current configuration.
-    server.before("agent.create", async ({ request }, { paseo }) => {
+    server.addHook("agent.create.before", async ({ request }, { paseo }) => {
       const { profiles } = await loaded;
+      // The first agent of a workspace from the New workspace screen can arrive before the
+      // notification that gives the workspace its sandbox.
+      await (await resolve(paseo)).adoptionsAt(request.config.cwd, paseo);
       const sandbox = store.findByCwd(request.config.cwd);
       const provider = request.config.provider;
       if (!sandbox) {
         if (profiles.isDerived(provider)) {
           throw new Error(
-            "Sandboxed providers run only in sandboxed workspaces. Create one with New sandboxed workspace.",
+            "Sandboxed providers run only in sandboxed workspaces. Choose a container profile in New workspace's Sandbox field.",
           );
         }
         return undefined;
@@ -48,18 +98,39 @@ export function registerHooks(input: {
       };
     }),
 
+    // The agent's own workspace is known only once it exists.
+    server.addHook("agent.create.after", async ({ agent }, { paseo }) => {
+      const { profiles } = await loaded;
+      if (!agent.workspaceId || !profiles.isDerived(agent.provider)) return;
+      if (!store.get(agent.workspaceId)) return;
+      markSandboxed(paseo, agent.id, agent.workspaceId);
+    }),
+
     // Tell the wrapper where a session runs. Resume, refresh, and import pass through here too,
     // so an agent saved with a host provider cannot reopen inside a sandbox.
-    server.before("agent.session_open", async ({ request }, { paseo }) => {
+    server.addHook("agent.open.before", async ({ request }, { paseo }) => {
       const { profiles, login } = await loaded;
-      const { workspaceId } = request;
+      const marker = sandboxMarker(request.metadata);
+      const workspaceId = agentWorkspaceId(request.workspaceId, marker);
+      // A workspace that asks for a sandbox it lacks gets it here, or its agents don't start.
+      const ownSandbox = workspaceId
+        ? await (
+            await resolve(paseo)
+          )
+            .ensureRequestedSandbox(workspaceId, paseo)
+            .catch((error: unknown) => {
+              if (request.purpose === "history") return null;
+              throw error;
+            })
+        : null;
       const route = routeSession({
         provider: request.provider,
         sandboxedProvider: profiles.isDerived(request.provider),
         purpose: request.purpose,
         workspaceId,
-        ownSandbox: workspaceId ? store.get(workspaceId) : null,
+        ownSandbox,
         wasSandboxed: workspaceId ? store.wasSandboxed(workspaceId) : false,
+        marker,
         directorySandbox: store.findByCwd(request.cwd),
       });
       switch (route.kind) {
@@ -85,6 +156,14 @@ export function registerHooks(input: {
           break;
       }
       const { sandbox } = route;
+      // Agents from before the plugin marked them; a new agent is marked once it exists.
+      if (
+        request.reason !== "create" &&
+        request.purpose === "interactive" &&
+        marker?.workspaceId !== sandbox.workspaceId
+      ) {
+        markSandboxed(paseo, request.agentId, sandbox.workspaceId);
+      }
       // The container runs, and the Claude folder is decided, before the session starts: the
       // daemon needs CLAUDE_CONFIG_DIR now, and an agent waits only so long for its CLI. Within the
       // hook's 30 seconds; a first image pull goes on in the background.
@@ -107,7 +186,7 @@ export function registerHooks(input: {
       };
     }),
 
-    server.on("workspace.archived", async ({ workspace }, { paseo }) => {
+    server.addHook("workspace.archive.after", async ({ workspace }, { paseo }) => {
       await (await resolve(paseo)).destroy(workspace.id);
     }),
   ];

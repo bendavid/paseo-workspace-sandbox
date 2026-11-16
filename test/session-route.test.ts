@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { routeSession, type SessionRouteInput } from "../server/session-route";
+import { agentWorkspaceId, routeSession, type SessionRouteInput } from "../server/session-route";
 import type { SandboxRecord } from "../shared/rpc";
 
 function sandbox(workspaceId: string): SandboxRecord {
@@ -33,6 +33,7 @@ function route(overrides: Partial<SessionRouteInput>) {
     workspaceId: null,
     ownSandbox: null,
     wasSandboxed: false,
+    marker: null,
     directorySandbox: null,
     ...overrides,
   });
@@ -88,4 +89,32 @@ test("without a known workspace, the directory keeps agents sandboxed", () => {
   expect(route({})).toMatchObject({ kind: "refuse" });
   expect(route({ purpose: "history" })).toEqual({ kind: "host" });
   expect(route({ sandboxedProvider: false })).toEqual({ kind: "pass" });
+});
+
+test("an agent marked as sandboxed never reopens on the host, even when the records are gone", () => {
+  const marker = { workspaceId: SANDBOXED.workspaceId };
+  const forgotten = { workspaceId: SANDBOXED.workspaceId, wasSandboxed: false, marker };
+  expect(route(forgotten)).toEqual({
+    kind: "refuse",
+    message: "This agent's workspace is no longer sandboxed.",
+  });
+  expect(route({ ...forgotten, purpose: "history" })).toEqual({ kind: "host" });
+  // Another workspace's marker says nothing about this one.
+  expect(route({ ...forgotten, workspaceId: "wks_main" })).toEqual({ kind: "host" });
+});
+
+test("an agent opened without its workspace takes it from its marker", () => {
+  const marker = { workspaceId: SANDBOXED.workspaceId };
+  expect(agentWorkspaceId(null, marker)).toBe(SANDBOXED.workspaceId);
+  expect(agentWorkspaceId("wks_main", marker)).toBe("wks_main");
+  expect(agentWorkspaceId(null, null)).toBeNull();
+  // Its own sandbox, not the one at its directory.
+  expect(
+    route({
+      workspaceId: agentWorkspaceId(null, marker),
+      ownSandbox: SANDBOXED,
+      directorySandbox: OTHER,
+      marker,
+    }),
+  ).toEqual({ kind: "sandbox", sandbox: SANDBOXED });
 });

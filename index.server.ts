@@ -8,15 +8,15 @@ import { SandboxService } from "./server/service";
 import { SandboxStore, resolveDataDirectory } from "./server/store";
 import { listTerminalProfiles } from "./server/terminals";
 import { writeWrapper } from "./server/wrapper";
+import { newWorkspaceSettings } from "./shared/settings";
 import {
   chooseImageRpc,
-  createSandboxedWorkspaceRpc,
   deleteContainerProfileRpc,
   imageStatusRpc,
   listContainerProfilesRpc,
-  listRefsRpc,
   listSandboxesRpc,
   listTerminalProfilesRpc,
+  pullImageRpc,
   enableRelativeWorktreesRpc,
   openSandboxShellRpc,
   recreateSandboxRpc,
@@ -66,10 +66,8 @@ export default function contribute(server: PluginServerContext) {
   };
 
   const removeHooks = registerHooks({ server, store, loaded, resolve });
+  server.registerSettings(newWorkspaceSettings);
 
-  server.handle(createSandboxedWorkspaceRpc, async (input, { paseo }) =>
-    (await resolve(paseo)).createWorkspace(input, paseo),
-  );
   server.handle(listSandboxesRpc, async (_input, { paseo }) => (await resolve(paseo)).list());
   server.handle(listContainerProfilesRpc, async () => (await loaded).containerProfiles.snapshot());
   server.handle(saveContainerProfileRpc, async ({ profile, makeDefault }) => {
@@ -102,7 +100,6 @@ export default function contribute(server: PluginServerContext) {
     await containerProfiles.delete(id);
     return containerProfiles.snapshot();
   });
-  server.handle(listRefsRpc, async (input, { paseo }) => (await resolve(paseo)).refs(input, paseo));
   server.handle(listTerminalProfilesRpc, async (_input, { paseo }) => {
     await resolve(paseo);
     return { profiles: await listTerminalProfiles(paseo) };
@@ -113,6 +110,10 @@ export default function contribute(server: PluginServerContext) {
   server.handle(imageStatusRpc, async ({ profileId }, { paseo }) =>
     (await resolve(paseo)).imageStatus(profileId),
   );
+  server.handle(pullImageRpc, async ({ profileId, image }, { paseo }) => {
+    await (await resolve(paseo)).pullImage(profileId, image);
+    return {};
+  });
   server.handle(chooseImageRpc, async ({ workspaceId, ...choice }, { paseo }) => {
     await (await resolve(paseo)).chooseImage(workspaceId, choice);
     return {};

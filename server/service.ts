@@ -1,7 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { readlink, realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import path from "node:path";
 import type { PaseoApi } from "./paseo";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
+import type { PluginHookRequests } from "@getpaseo/plugin/server";
 import type { ClaudeLoginKeeper } from "./claude-login";
 import { prepareClaudeHome } from "./claude-home";
 import { previewCommand, type PreviewWorkspace } from "./command-preview";
@@ -21,7 +24,7 @@ import {
   type ContainerTarget,
 } from "./container";
 import type { ContainerProfiles } from "./container-profiles";
-import { enableRelativeWorktrees, listRefs, relativeWorktrees } from "./git";
+import { enableRelativeWorktrees, relativeWorktrees } from "./git";
 import { resolveTerminalLaunch } from "./terminals";
 import { writeFileAtomic, type SandboxStore } from "./store";
 import {
@@ -34,6 +37,8 @@ import {
   profileSandboxFolder,
   recordAgentState,
   profileUser,
+  SANDBOX_METADATA_KEY,
+  WorkspaceSandboxRequestSchema,
   type ContainerProfile,
   type ContainerStatus,
   type ImageChoice,
@@ -43,29 +48,36 @@ import {
   type SandboxDependents,
   type SandboxHealth,
   type SandboxRecord,
-  type createSandboxedWorkspaceRpc,
+  type WorkspaceSandboxRequest,
   type imageStatusRpc,
-  type listRefsRpc,
   type listSandboxesRpc,
   type openSandboxShellRpc,
   type sandboxStatusRpc,
 } from "../shared/rpc";
 
-type CreateInput = RpcInput<typeof createSandboxedWorkspaceRpc>;
+/**
+ * How long after a New workspace request its sandbox may still be missing for its first agent, and
+ * how long a link made for it waits for its workspace.
+ */
+const ADOPTION_WINDOW_MS = 120_000;
+
+type WorkspaceCreateRequest = PluginHookRequests["workspace.create.before"];
+
+type ListedWorkspace = Awaited<ReturnType<PaseoApi["workspaces"]["list"]>>["entries"][number];
 
 /** Reads every page: a sandbox missing from a partial listing would be destroyed. */
-async function listActiveWorkspaceIds(paseo: PaseoApi): Promise<Set<string>> {
-  const ids = new Set<string>();
+async function listActiveWorkspaces(paseo: PaseoApi): Promise<Map<string, ListedWorkspace>> {
+  const workspaces = new Map<string, ListedWorkspace>();
   let cursor: string | undefined;
   do {
     const { entries, pageInfo } = await paseo.workspaces.list({
       includeBackground: true,
       page: { limit: 200, ...(cursor ? { cursor } : {}) },
     });
-    for (const workspace of entries) ids.add(workspace.id);
+    for (const workspace of entries) workspaces.set(workspace.id, workspace);
     cursor = pageInfo.nextCursor ?? undefined;
   } while (cursor);
-  return ids;
+  return workspaces;
 }
 
 /**
@@ -73,35 +85,6 @@ async function listActiveWorkspaceIds(paseo: PaseoApi): Promise<Set<string>> {
  * link to the project directory, which the project's other workspaces share, so it gets a title
  * that tells them apart.
  */
-function buildWorkspaceRequest(
-  input: CreateInput,
-  plan: {
-    isolation: "worktree" | "directory";
-    link: string;
-    project: {
-      projectRootPath: string;
-      projectCustomName?: string | null;
-      projectDisplayName: string;
-    };
-  },
-) {
-  const source =
-    plan.isolation === "worktree"
-      ? {
-          kind: "worktree" as const,
-          projectId: input.projectId,
-          action: "branch-off" as const,
-          ...(input.baseRef ? { baseBranch: input.baseRef } : {}),
-        }
-      : { kind: "directory" as const, path: plan.link, projectId: input.projectId };
-  const defaultTitle =
-    plan.isolation === "directory"
-      ? `${plan.project.projectCustomName ?? plan.project.projectDisplayName} (sandboxed)`
-      : undefined;
-  const title = input.title ?? defaultTitle;
-  return { source, ...(title ? { title } : {}) };
-}
-
 /** The sandbox needs to download its image, missing or outdated, and nobody agreed to it. */
 class ImageDownloadError extends Error {
   constructor(readonly download: ImageDownload) {
@@ -119,6 +102,11 @@ class ImageDownloadError extends Error {
 interface StartFailure {
   message: string;
   download?: ImageDownload;
+}
+
+/** Two engines' commands keep separate image stores. */
+function pullKey(cli: string, image: string): string {
+  return `${cli}\n${image}`;
 }
 
 function describeError(error: unknown): string {
@@ -164,8 +152,21 @@ export class SandboxService {
   private readonly imageChoices = new Map<string, ImageChoice>();
   /** Workspaces whose image is downloading. */
   private readonly downloading = new Set<string>();
-  /** Workspaces this process is creating; their pending records are not leftovers. */
-  private readonly creating = new Set<string>();
+  /** Downloads the user agreed to before any workspace needed them, by engine command and image. */
+  private readonly pulls = new Map<string, Promise<void>>();
+  /** Why such a download failed, until the next one. */
+  private readonly pullErrors = new Map<string, string>();
+  /** Sandboxes being set up for workspaces Paseo's New workspace screen created, by workspace ID. */
+  private readonly adoptions = new Map<string, { cwd: string; done: Promise<void> }>();
+  /**
+   * Until when a workspace from the New workspace screen may still be waiting for its sandbox. Its
+   * `workspace.create.after` is not awaited, so its first agent can arrive first.
+   */
+  private expectingAdoptionsUntil = 0;
+  /** Workspaces whose metadata asks for no sandbox, as last read. */
+  private readonly unrequested = new Set<string>();
+  /** Links made for New workspace requests whose workspaces do not exist yet. */
+  private readonly unclaimedLinks = new Map<string, ReturnType<typeof setTimeout>>();
   /**
    * Agents to resume once a changed sandbox runs again, by workspace ID: the next start that
    * succeeds resumes them, so a start waiting for a download still does.
@@ -355,6 +356,16 @@ export class SandboxService {
     images: ImageStore,
   ): Promise<void> {
     const { image } = record.profile;
+    // A download the user started from the New workspace screen is this start's too.
+    const pulling = this.pulls.get(pullKey(policy.cli, image));
+    if (pulling) {
+      this.downloading.add(record.workspaceId);
+      try {
+        await pulling.catch(() => undefined);
+      } finally {
+        this.downloading.delete(record.workspaceId);
+      }
+    }
     const state = await checkImage(image, await images.localDigests(policy.cli, image));
     if (state === "current" || state === "unverified") return;
     if (images.pullable?.(image) === false)
@@ -463,12 +474,6 @@ export class SandboxService {
     return project;
   }
 
-  async refs(input: RpcInput<typeof listRefsRpc>, paseo: PaseoApi) {
-    const project = await this.project(input.projectId, paseo);
-    if (project.projectKind !== "git") return { current: null, refs: [] };
-    return listRefs(project.projectRootPath);
-  }
-
   private async project(projectId: string, paseo: PaseoApi) {
     const { projects } = await paseo.projects.list();
     const project = projects.find((candidate) => candidate.projectId === projectId);
@@ -489,82 +494,166 @@ export class SandboxService {
     return { ...profile, image };
   }
 
-  /** Validates the request and resolves everything creation needs, before anything exists. */
-  private async planCreation(input: CreateInput, paseo: PaseoApi) {
-    const profile = await this.withResolvedImage(this.containerProfiles.get(input.profileId));
-    const project = await this.project(input.projectId, paseo);
-    const isGit = project.projectKind === "git";
-    const isolation = input.isolation ?? (isGit ? "worktree" : "directory");
-    if (isolation === "worktree" && !isGit) {
-      throw new Error("A sandboxed worktree needs a Git project");
-    }
+  /**
+   * Checks the New workspace Sandbox field's choice before Paseo creates the workspace, and
+   * returns the request to create. A directory workspace gets a link of its own, so its agents are
+   * told apart from those of the project's other workspaces.
+   */
+  async prepareWorkspaceRequest(
+    request: WorkspaceCreateRequest,
+    sandbox: WorkspaceSandboxRequest,
+    paseo: PaseoApi,
+  ): Promise<WorkspaceCreateRequest> {
+    const profile = await this.withResolvedImage(this.containerProfiles.get(sandbox.profileId));
     const policy = await this.policy(profile);
     if (engineUsesImage(policy.engine) && !isValidImage(policy.engine, profile.image)) {
       throw new Error(`${imageHint(policy.engine)}, in the container profile "${profile.name}"`);
     }
-    if (input.imageChoice && input.imageChoice.image !== profile.image) {
-      throw new Error(
-        `The image ${input.imageChoice.image} is not the profile's (${profile.image})`,
-      );
+    const { imageChoice } = sandbox;
+    if (imageChoice && imageChoice.image !== profile.image) {
+      throw new Error(`The image ${imageChoice.image} is not the profile's (${profile.image})`);
     }
-    // Paseo creates the worktree; at sandbox paths its git links must be relative to resolve.
-    if (isolation === "worktree") await requireRelativeWorktrees(profile, project.projectRootPath);
-    return { profile, project, isolation, policy };
+    // Only the server names a linked directory.
+    const kept: WorkspaceSandboxRequest = {
+      profileId: sandbox.profileId,
+      ...(imageChoice ? { imageChoice } : {}),
+    };
+    const { source } = request;
+    this.expectingAdoptionsUntil = Date.now() + ADOPTION_WINDOW_MS;
+    if (source.kind === "worktree") {
+      const repoRoot = source.projectId
+        ? (await this.project(source.projectId, paseo)).projectRootPath
+        : source.cwd;
+      if (repoRoot) await requireRelativeWorktrees(profile, repoRoot);
+      return { ...request, metadata: { ...request.metadata, [SANDBOX_METADATA_KEY]: kept } };
+    }
+    const raw = source.path;
+    const directory = path.resolve(
+      raw === "~" || raw.startsWith("~/") ? path.join(homedir(), raw.slice(1)) : raw,
+    );
+    const link = this.store.linkPath(`new_${randomBytes(8).toString("hex")}`);
+    await createLink(link, directory);
+    // Removed unless its workspace is created and adopted in time.
+    const expiry = setTimeout(() => {
+      this.unclaimedLinks.delete(link);
+      void removeLink(link);
+    }, ADOPTION_WINDOW_MS);
+    expiry.unref();
+    this.unclaimedLinks.set(link, expiry);
+    const title =
+      request.title?.trim() || request.firstAgentContext
+        ? request.title
+        : `${await this.projectTitle(source.projectId, directory, paseo)} (sandboxed)`;
+    const metadata: WorkspaceSandboxRequest = { ...kept, linkedDirectory: directory };
+    return {
+      ...request,
+      source: { ...source, path: link },
+      ...(title ? { title } : {}),
+      metadata: { ...request.metadata, [SANDBOX_METADATA_KEY]: metadata },
+    };
+  }
+
+  private async projectTitle(projectId: string | undefined, directory: string, paseo: PaseoApi) {
+    if (!projectId) return path.basename(directory);
+    const project = await this.project(projectId, paseo).catch(() => null);
+    return project
+      ? (project.projectCustomName ?? project.projectDisplayName)
+      : path.basename(directory);
   }
 
   /**
-   * Registers the sandbox under a workspace ID chosen here, then creates the workspace with it:
-   * every client that sees the new workspace already finds its sandbox.
+   * Gives a workspace the sandbox its metadata asks for. The sandbox starts in the background;
+   * agents and terminals wait for it when they launch. A missing or outdated image that the field
+   * did not ask about fails its start, and the Sandbox panel offers the download.
    */
-  private async createRegistered(
-    input: CreateInput,
-    plan: Awaited<ReturnType<SandboxService["planCreation"]>>,
-    paseo: PaseoApi,
-  ): Promise<SandboxRecord> {
-    const workspaceId = `wks_${randomBytes(8).toString("hex")}`;
-    const directory = plan.isolation === "directory";
-    const link = this.store.linkPath(workspaceId);
-    const pending: SandboxRecord = {
-      workspaceId,
-      projectId: input.projectId,
-      cwd: "",
-      container: containerName(workspaceId),
-      createdAt: new Date().toISOString(),
-      profile: plan.profile,
-      pending: true,
-      claudeHome: CLAUDE_HOME_FOR[profileAgentState(plan.profile)],
-      ...(directory ? { linkedDirectory: plan.project.projectRootPath } : {}),
-    };
-    this.creating.add(workspaceId);
-    await this.store.put(pending);
-    if (directory) await createLink(link, plan.project.projectRootPath);
-    const workspace = await paseo.workspaces
-      .create({ workspaceId, ...buildWorkspaceRequest(input, { ...plan, link }) })
-      .catch(async (error: unknown) => {
-        await this.store.remove(workspaceId);
-        if (directory) await removeLink(link);
-        throw error;
-      })
-      .finally(() => this.creating.delete(workspaceId));
-    const cwd = workspace.directory ?? (await workspace.refresh())?.workspaceDirectory;
-    if (!cwd) throw new Error(`Workspace ${workspace.id} has no directory`);
-    // Complete the record before any agent can be created in it, so the hooks see it.
-    const { pending: _pending, ...settled } = pending;
-    const record: SandboxRecord = { ...settled, cwd };
-    await this.store.put(record);
-    return record;
+  adoptWorkspace(
+    workspace: { id: string; projectId: string; cwd: string },
+    request: WorkspaceSandboxRequest,
+  ): Promise<void> {
+    if (this.store.get(workspace.id)) return Promise.resolve();
+    const running = this.adoptions.get(workspace.id);
+    if (running) return running.done;
+    const done = (async () => {
+      const { linkedDirectory } = request;
+      // A linked directory is the one this plugin's link at the workspace points to.
+      if (
+        linkedDirectory &&
+        (await readlink(workspace.cwd).catch(() => null)) !== linkedDirectory
+      ) {
+        throw new Error(`Workspace ${workspace.id} is not at a link to ${linkedDirectory}`);
+      }
+      const unclaimed = this.unclaimedLinks.get(workspace.cwd);
+      if (unclaimed) clearTimeout(unclaimed);
+      this.unclaimedLinks.delete(workspace.cwd);
+      const profile = await this.withResolvedImage(this.containerProfiles.get(request.profileId));
+      await this.store.put({
+        workspaceId: workspace.id,
+        projectId: workspace.projectId,
+        cwd: workspace.cwd,
+        container: containerName(workspace.id),
+        createdAt: new Date().toISOString(),
+        profile,
+        claudeHome: CLAUDE_HOME_FOR[profileAgentState(profile)],
+        ...(linkedDirectory ? { linkedDirectory } : {}),
+      });
+      if (request.imageChoice) this.imageChoices.set(workspace.id, request.imageChoice);
+      void this.ensureRunning(workspace.id);
+    })().finally(() => this.adoptions.delete(workspace.id));
+    this.adoptions.set(workspace.id, { cwd: workspace.cwd, done });
+    return done;
   }
 
-  async createWorkspace(
-    input: CreateInput,
+  /**
+   * Waits for the sandboxes of workspaces at `cwd` that the New workspace screen just created,
+   * so their first agent finds them. Looks the workspaces up only while one may still be missing.
+   */
+  async adoptionsAt(cwd: string, paseo: PaseoApi): Promise<void> {
+    const inside = (directory: string) => cwd === directory || cwd.startsWith(`${directory}/`);
+    await Promise.all(
+      [...this.adoptions.values()].filter((entry) => inside(entry.cwd)).map((entry) => entry.done),
+    );
+    if (Date.now() > this.expectingAdoptionsUntil || this.store.findByCwd(cwd)) return;
+    const { entries } = await paseo.workspaces.list({ page: { limit: 200 } });
+    await Promise.all(
+      entries
+        .filter((workspace) => workspace.workspaceDirectory && inside(workspace.workspaceDirectory))
+        .map((workspace) => this.adoptRequested(workspace)),
+    );
+  }
+
+  /**
+   * Whether a workspace without a sandbox asks for one in its metadata, in which case it gets it
+   * now; a request whose sandbox can't be added throws. Its `workspace.create.after` may have
+   * failed, or the plugin may not have been running. Each workspace is looked up once.
+   */
+  async ensureRequestedSandbox(
+    workspaceId: string,
     paseo: PaseoApi,
-  ): Promise<RpcOutput<typeof createSandboxedWorkspaceRpc>> {
-    const plan = await this.planCreation(input, paseo);
-    const record = await this.createRegistered(input, plan, paseo);
-    if (input.imageChoice) this.imageChoices.set(record.workspaceId, input.imageChoice);
-    // The workspace opens at once; agents and terminals wait for the sandbox when they launch.
-    void this.ensureRunning(record.workspaceId);
-    return { workspaceId: record.workspaceId };
+  ): Promise<SandboxRecord | null> {
+    const existing = this.store.get(workspaceId);
+    if (existing || this.unrequested.has(workspaceId)) return existing ?? null;
+    const workspace = await paseo.workspaces.ref(workspaceId).refresh();
+    if (!workspace || !(await this.adoptRequested(workspace))) {
+      this.unrequested.add(workspaceId);
+      return null;
+    }
+    return this.store.get(workspaceId) ?? null;
+  }
+
+  /** Adopts a listed workspace whose metadata asks for a sandbox; false when it asks for none. */
+  private async adoptRequested(workspace: ListedWorkspace): Promise<boolean> {
+    const request = WorkspaceSandboxRequestSchema.safeParse(
+      workspace.metadata?.[SANDBOX_METADATA_KEY],
+    );
+    if (!request.success) return false;
+    if (!workspace.workspaceDirectory) {
+      throw new Error(`Workspace ${workspace.id} asks for a sandbox but has no directory`);
+    }
+    await this.adoptWorkspace(
+      { id: workspace.id, projectId: workspace.projectId, cwd: workspace.workspaceDirectory },
+      request.data,
+    );
+    return true;
   }
 
   /** A profile's image and how it compares with its registry; null for engines without images. */
@@ -577,8 +666,41 @@ export class SandboxService {
       return { image: null, state: "current" };
     }
     const policy = await this.policy(profile);
+    const key = pullKey(policy.cli, profile.image);
+    if (this.pulls.has(key)) return { image: profile.image, state: "downloading" };
     const local = await images.localDigests(policy.cli, profile.image);
-    return { image: profile.image, state: await checkImage(profile.image, local) };
+    const state = await checkImage(profile.image, local);
+    const error =
+      state === "missing" || state === "outdated" ? this.pullErrors.get(key) : undefined;
+    return { image: profile.image, state, ...(error ? { error } : {}) };
+  }
+
+  /**
+   * Downloads a profile's image now, in the background, once the user agreed to that exact
+   * reference: the image the profile resolves to here, so a profile changed since cannot download
+   * another.
+   */
+  async pullImage(profileId: string, image: string): Promise<void> {
+    const profile = await this.withResolvedImage(this.containerProfiles.get(profileId));
+    if (profile.image !== image) {
+      throw new Error(`The image ${image} is not the profile's (${profile.image})`);
+    }
+    const { images } = backendFor(profile.engine);
+    if (!images || images.pullable?.(image) === false) {
+      throw new Error(`The image ${image} is not downloaded from a registry`);
+    }
+    const policy = await this.policy(profile);
+    const key = pullKey(policy.cli, image);
+    if (this.pulls.has(key)) return;
+    this.pullErrors.delete(key);
+    const pull = images
+      .pull(policy.cli, image)
+      .catch((error: unknown) => {
+        this.pullErrors.set(key, describeError(error));
+        console.error(`Downloading ${image} failed`, describeError(error));
+      })
+      .finally(() => this.pulls.delete(key));
+    this.pulls.set(key, pull);
   }
 
   /** Starts a sandbox with the user's answer for its image, which names the sandbox's image. */
@@ -840,38 +962,35 @@ export class SandboxService {
     this.failures.delete(workspaceId);
     const policy = await this.recordPolicy(record);
     await backendFor(policy.engine).remove(workspaceTarget(record, { mode: "none" }), policy);
-    if (record.linkedDirectory) await removeLink(this.store.linkPath(workspaceId));
-  }
-
-  /** Finishes a record left pending when the daemon stopped while creating its workspace. */
-  private async completePending(record: SandboxRecord, paseo: PaseoApi) {
-    const workspace = await paseo.workspaces.ref(record.workspaceId).refresh();
-    if (!workspace?.workspaceDirectory) {
-      await this.destroy(record.workspaceId);
-      return null;
+    // The plugin's own form names the link after the workspace; Paseo's New workspace screen
+    // gets one before the workspace exists.
+    if (record.linkedDirectory) {
+      const inLinks = path.dirname(record.cwd) === path.dirname(this.store.linkPath(workspaceId));
+      await removeLink(inLinks ? record.cwd : this.store.linkPath(workspaceId));
     }
-    const { pending: _pending, ...settled } = record;
-    const completed: SandboxRecord = { ...settled, cwd: workspace.workspaceDirectory };
-    await this.store.put(completed);
-    return completed;
   }
 
   /**
-   * Rewrites every spec with the current CLI and the workspace's own container configuration, and
-   * removes sandboxes whose workspace was archived while the plugin was not running.
+   * Rewrites every spec with the current CLI and the workspace's own container configuration,
+   * removes sandboxes whose workspace was archived while the plugin was not running, and adds the
+   * sandboxes of workspaces created meanwhile.
    */
   async reconcile(paseo: PaseoApi): Promise<void> {
-    const active = await listActiveWorkspaceIds(paseo);
-    for (const listed of this.store.list()) {
-      if (this.creating.has(listed.workspaceId)) continue;
-      if (!active.has(listed.workspaceId)) {
-        await this.destroy(listed.workspaceId);
+    const active = await listActiveWorkspaces(paseo);
+    for (const record of this.store.list()) {
+      // Records an older version left while creating a workspace never complete.
+      if (!active.has(record.workspaceId) || record.pending) {
+        await this.destroy(record.workspaceId);
         continue;
       }
-      const record = listed.pending ? await this.completePending(listed, paseo) : listed;
-      if (!record) continue;
       await this.refreshSpec(await this.settleClaudeHome(record)).catch((error: unknown) =>
         console.error(`Sandbox ${record.workspaceId} could not be prepared`, describeError(error)),
+      );
+    }
+    for (const workspace of active.values()) {
+      if (this.store.get(workspace.id)) continue;
+      await this.adoptRequested(workspace).catch((error: unknown) =>
+        console.error(`Sandbox for ${workspace.id} could not be added`, describeError(error)),
       );
     }
   }

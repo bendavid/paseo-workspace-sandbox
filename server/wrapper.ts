@@ -49,6 +49,11 @@ esac
 case $workspace_id in
   *[!A-Za-z0-9_.-]*) fail "invalid workspace id" ;;
 esac
+# Paseo names every agent's workspace; the plugin's choice of sandbox must be that workspace's.
+if [ "$mode" = agent ] && [ -n "$workspace_id" ] && [ -n "\${PASEO_WORKSPACE_ID:-}" ] &&
+  [ "$PASEO_WORKSPACE_ID" != "$workspace_id" ]; then
+  fail "agent of workspace $PASEO_WORKSPACE_ID routed to the sandbox of $workspace_id"
+fi
 # Paseo names a terminal tab from the title its program sets, else from the command line.
 title=
 if [ "$mode" = terminal ] && [ "\${1:-}" = --title ]; then

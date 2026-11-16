@@ -4,23 +4,27 @@ import type {
   PluginButtonRegistration,
   PluginClientContext,
 } from "@getpaseo/plugin/client";
+import { z } from "zod";
 import {
   listSandboxesRpc,
   listTerminalProfilesRpc,
   openSandboxShellRpc,
-  type ClaudeLogin,
-  type SandboxHealth,
-  type SandboxRecord,
+  SANDBOX_METADATA_KEY,
+  WorkspaceSandboxRequestSchema,
   type SandboxTerminalProfile,
 } from "../shared/rpc";
+import {
+  badgeLook,
+  badgeStateOf,
+  FAILED_POLL_MS,
+  LOGIN_POLL_MS,
+  STARTING_POLL_MS,
+  type BadgeState,
+  type SandboxBadges,
+} from "./sandbox-state";
+import { HEADER_ICONS } from "./status-icons";
 
 const TERMINAL_ICON = "SquareTerminal";
-// Nothing pushes state to the app, so the list is polled: quickly while a sandbox starts, often
-// while one has failed, since the Sandbox panel's download or go-ahead starts it again, and once a
-// minute while a sandbox depends on the host's Claude login, which /logout ends at once.
-const STARTING_POLL_MS = 2_000;
-const FAILED_POLL_MS = 5_000;
-const LOGIN_POLL_MS = 60_000;
 
 interface HeaderButtons {
   badge: PluginButtonRegistration;
@@ -28,31 +32,23 @@ interface HeaderButtons {
   look: string;
 }
 
-type BadgeState = SandboxHealth | { state: "sign-in"; message: string };
+const WorkspaceUpsertSchema = z.object({
+  type: z.literal("workspace_update"),
+  payload: z.object({
+    kind: z.literal("upsert"),
+    workspace: z.object({ id: z.string(), metadata: z.record(z.string(), z.unknown()).optional() }),
+  }),
+});
 
-/** A running sandbox with a private Claude folder can't sign in while the host is signed out. */
-function badgeStateOf(
-  sandbox: SandboxRecord & { health: SandboxHealth },
-  login: ClaudeLogin,
-): BadgeState {
-  if (sandbox.health.state !== "ready" || sandbox.claudeHome !== "private") return sandbox.health;
-  if (login.state === "signed-out" || login.state === "refresh-failed") {
-    return { state: "sign-in", message: login.message };
-  }
-  return sandbox.health;
-}
-
-function badgeLook(badge: BadgeState): { label: string; icon: string; title: string } {
-  switch (badge.state) {
-    case "starting":
-      return { label: "Sandbox starting", icon: "Hourglass", title: "Sandbox status" };
-    case "ready":
-      return { label: "Sandboxed", icon: "Box", title: "Sandbox status" };
-    case "failed":
-      return { label: "Sandbox failed", icon: "TriangleAlert", title: badge.error };
-    case "sign-in":
-      return { label: "Sign in on host", icon: "KeyRound", title: badge.message };
-  }
+/** Whether a workspace update is for a workspace whose sandbox the server is still adding. */
+function awaitsSandbox(message: unknown, known: (id: string) => boolean): boolean {
+  const update = WorkspaceUpsertSchema.safeParse(message);
+  if (!update.success) return false;
+  const { workspace } = update.data.payload;
+  return (
+    !known(workspace.id) &&
+    WorkspaceSandboxRequestSchema.safeParse(workspace.metadata?.[SANDBOX_METADATA_KEY]).success
+  );
 }
 
 /** The terminal button's menu: a login shell, then each terminal profile, run in the container. */
@@ -91,7 +87,10 @@ function terminalMenu(
  * Shows a "Sandboxed" header button on every sandboxed workspace, and beside it a terminal button
  * whose menu opens a terminal or a terminal profile inside the container.
  */
-export function contributeHeaderBadges(client: PluginClientContext): () => void {
+export function contributeHeaderBadges(
+  client: PluginClientContext,
+  badges: SandboxBadges,
+): () => void {
   const buttons = new Map<string, HeaderButtons>();
   let stopped = false;
   let release: (() => Promise<void>) | null = null;
@@ -109,6 +108,7 @@ export function contributeHeaderBadges(client: PluginClientContext): () => void 
       workspaceId,
       button: {
         ...look,
+        icon: HEADER_ICONS[badgeState.state],
         behavior: {
           kind: "action",
           onPress() {
@@ -133,13 +133,13 @@ export function contributeHeaderBadges(client: PluginClientContext): () => void 
     });
   };
 
-  /** Updates the badge. The New sandboxed workspace form reports its own sandbox's failures. */
+  /** Updates the badge's label, tooltip, and colored icon when the sandbox's state changes. */
   const showBadge = (workspaceId: string, badgeState: BadgeState) => {
     const registered = buttons.get(workspaceId);
     const look = badgeLook(badgeState);
     if (registered && registered.look !== JSON.stringify(look)) {
       registered.look = JSON.stringify(look);
-      registered.badge.update(look);
+      registered.badge.update({ ...look, icon: HEADER_ICONS[badgeState.state] });
     }
   };
 
@@ -164,11 +164,14 @@ export function contributeHeaderBadges(client: PluginClientContext): () => void 
         registered.terminal.update({ behavior: terminalMenu(client, workspaceId, profiles) });
       }
     }
+    const states = new Map<string, BadgeState>();
     for (const sandbox of sandboxes) {
       const state = badgeStateOf(sandbox, claudeLogin);
+      states.set(sandbox.workspaceId, state);
       if (!buttons.has(sandbox.workspaceId)) add(sandbox.workspaceId, state, profiles);
       showBadge(sandbox.workspaceId, state);
     }
+    badges.set(states);
     if (sandboxes.some((sandbox) => sandbox.health.state === "starting")) {
       schedulePoll(STARTING_POLL_MS);
     } else if (sandboxes.some((sandbox) => sandbox.health.state === "failed")) {
@@ -196,14 +199,21 @@ export function contributeHeaderBadges(client: PluginClientContext): () => void 
     };
   };
 
-  // Workspace changes are when a sandbox can appear or disappear. The server registers a sandbox
-  // under its workspace ID before creating the workspace, so the list is already current.
+  // Workspace changes are when a sandbox can appear or disappear. New sandboxed workspace registers
+  // a sandbox before it creates the workspace; one from Paseo's New workspace screen gets its
+  // sandbox just after, so the list is asked again shortly.
   void client.paseo.workspaces
     .list({ subscribe: {} })
     .then(({ subscription }) => {
       if (stopped) return subscription.release();
       release = () => subscription.release();
-      subscription.subscribe({ snapshot: refreshLogged, update: refreshLogged });
+      subscription.subscribe({
+        snapshot: refreshLogged,
+        update(message) {
+          refreshLogged();
+          if (awaitsSandbox(message, (id) => buttons.has(id))) schedulePoll(STARTING_POLL_MS);
+        },
+      });
       return undefined;
     })
     .catch((error) => {

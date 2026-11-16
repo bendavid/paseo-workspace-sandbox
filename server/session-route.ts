@@ -1,6 +1,6 @@
-import type { SandboxRecord } from "../shared/rpc";
+import type { AgentSandboxMarker, SandboxRecord } from "../shared/rpc";
 
-/** Where an agent session runs, decided in `agent.session_open`. */
+/** Where an agent session runs, decided in `agent.open.before`. */
 export type SessionRoute =
   /** A host provider on the host: the request goes through unchanged. */
   | { kind: "pass" }
@@ -25,14 +25,27 @@ export interface SessionRouteInput {
   workspaceId: string | null;
   /** That workspace's sandbox. */
   ownSandbox: SandboxRecord | null;
-  /** Whether that workspace had a sandbox that is gone. */
+  /** Whether that workspace had a sandbox that is gone, by the plugin's records. */
   wasSandboxed: boolean;
+  /** The sandbox the agent ran in, as its metadata records. Outlives the plugin's records. */
+  marker: AgentSandboxMarker | null;
   /** The sandbox whose directory contains the agent's, for agents of unknown workspace. */
   directorySandbox: SandboxRecord | null;
 }
 
 /**
- * `agent.create` only sees the agent's directory, so an unsandboxed workspace that shares a
+ * The agent's workspace: the daemon's, else the one its marker names. Sessions resumed through the
+ * SDK's `resumeAgent` arrive without one.
+ */
+export function agentWorkspaceId(
+  workspaceId: string | null,
+  marker: AgentSandboxMarker | null,
+): string | null {
+  return workspaceId ?? marker?.workspaceId ?? null;
+}
+
+/**
+ * `agent.create.before` only sees the agent's directory, so an unsandboxed workspace that shares a
  * sandbox's directory still gets sandboxed providers for its new agents. Here the agent's own
  * workspace decides: its own sandbox, else the host. Only when the workspace is unknown does the
  * directory decide, keeping such agents sandboxed.
@@ -51,7 +64,8 @@ export function routeSession(input: SessionRouteInput): SessionRoute {
   }
   if (sandbox) return { kind: "sandbox", sandbox };
   // A workspace that never had a sandbox shares a sandbox's directory: its agents run on the host.
-  if (known && !input.wasSandboxed) return { kind: "host" };
+  const wasSandboxed = input.wasSandboxed || input.marker?.workspaceId === input.workspaceId;
+  if (known && !wasSandboxed) return { kind: "host" };
   // The sandbox is gone. History still shows on the host; running again would leave the sandbox.
   if (input.purpose === "history") return { kind: "host" };
   return { kind: "refuse", message: "This agent's workspace is no longer sandboxed." };

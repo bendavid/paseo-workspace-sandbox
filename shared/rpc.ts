@@ -318,10 +318,7 @@ export const SandboxRecordSchema = z.object({
    * workspaces by directory. Sandboxed directories from before links use the project directory.
    */
   linkedDirectory: z.string().optional(),
-  /**
-   * Registered under the workspace ID the plugin chose, before the workspace exists, so clients
-   * that see the new workspace already find its sandbox. `cwd` is empty until creation returns.
-   */
+  /** Left by versions before 0.6 while they created a workspace; reconcile removes these. */
   pending: z.boolean().optional(),
   /**
    * The sandbox's Claude folder, from the profile's agent state when it was created: `private`
@@ -369,6 +366,26 @@ export const ImageChoiceSchema = z.object({
 
 export type ImageChoice = z.infer<typeof ImageChoiceSchema>;
 
+/** The plugin's key in workspace and agent metadata. */
+export const SANDBOX_METADATA_KEY = "workspace-sandbox";
+
+/** What the New workspace field stores on the workspace it creates: the profile to sandbox it with. */
+export const WorkspaceSandboxRequestSchema = z.object({
+  profileId: z.string().min(1),
+  /**
+   * Set by the server for a directory workspace, which it creates at a link of its own: the
+   * directory the link points to.
+   */
+  linkedDirectory: z.string().min(1).optional(),
+  /** The answer to the field's question about a missing or outdated image. */
+  imageChoice: ImageChoiceSchema.optional(),
+});
+export type WorkspaceSandboxRequest = z.infer<typeof WorkspaceSandboxRequestSchema>;
+
+/** What the plugin stores on an agent once it has run in a sandbox: that sandbox's workspace. */
+export const AgentSandboxMarkerSchema = z.object({ workspaceId: z.string().min(1) });
+export type AgentSandboxMarker = z.infer<typeof AgentSandboxMarkerSchema>;
+
 export const ContainerStatusSchema = z.discriminatedUnion("state", [
   /** `downloading` names the image being pulled. */
   z.object({ state: z.literal("starting"), downloading: z.string().optional() }),
@@ -385,31 +402,6 @@ export const ContainerStatusSchema = z.discriminatedUnion("state", [
 
 export type ContainerStatus = z.infer<typeof ContainerStatusSchema>;
 
-export const createSandboxedWorkspaceRpc = defineRpc({
-  name: "sandbox.workspace.create",
-  input: z.object({
-    projectId: z.string().min(1),
-    /** The container profile to copy; the default profile when omitted. */
-    profileId: z.string().min(1).optional(),
-    /**
-     * `worktree` (Git projects only) gives the sandbox its own worktree; `directory` uses the
-     * project directory, which the project's other workspaces share. Defaults to `worktree` for
-     * Git projects and `directory` otherwise.
-     */
-    isolation: z.enum(["worktree", "directory"]).optional(),
-    /** Starting ref for a Git project's worktree; the project's current branch when omitted. */
-    baseRef: z.string().trim().min(1).optional(),
-    title: z.string().trim().min(1).optional(),
-    /**
-     * What to do when the profile's image is missing or outdated. Without it, nothing is
-     * downloaded and such an image fails the sandbox's start.
-     */
-    imageChoice: ImageChoiceSchema.optional(),
-  }),
-  /** Returns as soon as the workspace exists; the sandbox is ready when its status says so. */
-  output: z.object({ workspaceId: z.string() }),
-});
-
 export const SandboxTerminalProfileSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -423,15 +415,6 @@ export const listTerminalProfilesRpc = defineRpc({
   name: "sandbox.terminal-profiles.list",
   input: z.object({}),
   output: z.object({ profiles: z.array(SandboxTerminalProfileSchema) }),
-});
-
-export const listRefsRpc = defineRpc({
-  name: "sandbox.refs.list",
-  input: z.object({ projectId: z.string().min(1) }),
-  output: z.object({
-    current: z.string().nullable(),
-    refs: z.array(z.object({ name: z.string(), remote: z.boolean() })),
-  }),
 });
 
 const ProfileListSchema = z.object({
@@ -649,8 +632,20 @@ export const imageStatusRpc = defineRpc({
   /** `image` is null for engines that run the host's system. */
   output: z.object({
     image: z.string().nullable(),
-    state: z.enum(["current", "missing", "outdated", "unverified"]),
+    state: z.enum(["current", "missing", "outdated", "unverified", "downloading"]),
+    /** Why the last download of this image failed, while it is still missing or outdated. */
+    error: z.string().optional(),
   }),
+});
+
+/**
+ * Downloads a profile's image now, after the user agreed to that exact reference. Returns at once;
+ * the image's status reports the download, and sandboxes that start meanwhile wait for it.
+ */
+export const pullImageRpc = defineRpc({
+  name: "sandbox.image.pull",
+  input: z.object({ profileId: z.string().min(1), image: z.string().min(1) }),
+  output: z.object({}),
 });
 
 /**
